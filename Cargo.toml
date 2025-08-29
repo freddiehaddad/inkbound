@@ -1,0 +1,25 @@
+[package]
+name = "pentarget"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "*"
+clap = { version = "*", features = ["derive"] }
+ctrlc = "*"
+once_cell = "*"
+thiserror = "*"
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+widestring = "*"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_SystemServices",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+] }

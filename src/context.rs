@@ -39,12 +39,9 @@ fn select_first_working_option<F>(desired: u32, mut try_open: F) -> Option<u32>
 where
     F: FnMut(u32) -> bool,
 {
-    for opts in fallback_options(desired) {
-        if try_open(opts) {
-            return Some(opts);
-        }
-    }
-    None
+    fallback_options(desired)
+        .into_iter()
+        .find(|&opts| try_open(opts))
 }
 
 /// Open a WinTab context for `hwnd`, applying a fallback sequence of option flags.
@@ -114,6 +111,46 @@ pub fn reopen_context(
         false
     } else {
         error!("failed to lock context mutex for reopen");
+        false
+    }
+}
+
+/// Reopen context using a fully prepared LOGCONTEXT template (e.g. with cropped lcIn* / lcOut* fields).
+/// Similar to `reopen_context` but does not overwrite geometry fields; only iterates option fallbacks.
+pub fn reopen_with_template(
+    hctx_cell: &Arc<Mutex<HCTX>>,
+    hwnd: SendHwnd,
+    template: LOGCONTEXTA,
+    final_options: u32,
+) -> bool {
+    if let Ok(mut guard) = hctx_cell.lock() {
+        let old = *guard;
+        wt_close(old);
+        for opts in fallback_options(final_options) {
+            let mut ctx_attempt = template;
+            ctx_attempt.lcOptions = opts; // only vary options
+            match wt_open(hwnd.0, &ctx_attempt) {
+                Ok(hnew) => {
+                    *guard = hnew;
+                    info!(
+                        options = format!("0x{opts:08X}"),
+                        "reopen(template) WTOpen succeeded"
+                    );
+                    return true;
+                }
+                Err(e) => {
+                    error!(
+                        options = format!("0x{opts:08X}"),
+                        ?e,
+                        "reopen(template) failed"
+                    );
+                }
+            }
+        }
+        error!("all reopen(template) attempts failed");
+        false
+    } else {
+        error!("failed to lock context mutex for reopen_with_template");
         false
     }
 }

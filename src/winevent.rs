@@ -3,8 +3,7 @@
 //! Provides a minimal abstraction over SetWinEventHook for a bounded list of event types that
 //! influence tablet mapping: creation, visibility, location/size changes, foreground switches
 //! and minimize transitions. A user‑supplied callback (Arc) is invoked for every matching event
-//! affecting the configured target window. Non‑target foreground changes can optionally trigger
-//! a synthetic reset callback (zero RECT) enabling temporary full‑tablet mapping.
+//! affecting the configured target window.
 
 use anyhow::{Result, anyhow};
 use once_cell::sync::OnceCell;
@@ -18,28 +17,28 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT,
-    GW_HWNDNEXT, GetAncestor, GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetWindow,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EnumWindows,
+    GA_ROOT, GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible,
 };
 
 /// Window matching strategy (mutually exclusive CLI selectors).
+#[derive(Clone, PartialEq)]
 pub enum Target {
-    ByProcessName(String),
-    ByWindowClass(String),
-    ByTitleSubstring(String),
+    ProcessName(String),
+    WindowClass(String),
+    TitleSubstring(String),
 }
 /// Static filter configuration applied to all installed hooks.
 pub struct HookFilter {
     pub target: Target,
-    pub reset_on_foreground_loss: bool,
 }
 
 /// User callback signature: (window handle, event id, rectangle).
 pub type WinEventCallback = dyn Fn(HWND, u32, RECT) + Send + Sync + 'static;
 
 static CALLBACK: OnceCell<Arc<WinEventCallback>> = OnceCell::new();
-static FILTER: OnceCell<HookFilter> = OnceCell::new();
+static FILTER: OnceCell<Mutex<HookFilter>> = OnceCell::new();
 // Wrapper for hook handle so we can mark it Send/Sync (the handle is only used on the creating thread).
 #[derive(Copy, Clone)]
 struct HookHandle(HWINEVENTHOOK);
@@ -47,7 +46,6 @@ unsafe impl Send for HookHandle {}
 unsafe impl Sync for HookHandle {}
 
 static HOOKS: OnceCell<Mutex<Vec<HookHandle>>> = OnceCell::new();
-// Delay logic removed; sequence no longer needed.
 
 /// Raw WinEvent callback (FFI boundary). Performs filtering and rectangle acquisition then
 /// dispatches to the registered safe Rust closure.
@@ -68,22 +66,22 @@ unsafe extern "system" fn win_event_proc(
         if GetAncestor(hwnd, GA_ROOT) != hwnd {
             return;
         }
-        if !IsWindowVisible(hwnd).as_bool() {
+        // Allow destroy events through even if the window is already not visible so we can reset state.
+        let is_destroy = event == EVENT_OBJECT_DESTROY;
+        if !is_destroy && !IsWindowVisible(hwnd).as_bool() {
             return;
         }
     }
-    let filter = match FILTER.get() {
-        Some(f) => f,
-        None => return,
-    };
-    let is_foreground = event == EVENT_SYSTEM_FOREGROUND;
-    let is_match = matches_target(hwnd, &filter.target);
-    if !is_match {
-        if is_foreground && filter.reset_on_foreground_loss {
-            if let Some(cb) = CALLBACK.get() {
-                cb(hwnd, event, RECT::default()); // synthetic reset trigger (zero rect)
-            }
+    let is_match = if let Some(f_mtx) = FILTER.get() {
+        if let Ok(f) = f_mtx.lock() {
+            matches_target(hwnd, &f.target)
+        } else {
+            false
         }
+    } else {
+        false
+    };
+    if !is_match {
         return;
     }
     let mut rect = RECT::default();
@@ -96,14 +94,9 @@ unsafe extern "system" fn win_event_proc(
         )
         .is_ok()
     };
-    if !ok_dwm {
-        unsafe {
-            if !GetWindowRect(hwnd, &mut rect).is_ok() {
-                return;
-            }
-        }
+    if !ok_dwm && unsafe { GetWindowRect(hwnd, &mut rect).is_err() } {
+        return;
     }
-    // (Debounce removed – every LOCATIONCHANGE generates a callback)
     if let Some(cb) = CALLBACK.get() {
         cb(hwnd, event, rect);
     }
@@ -120,15 +113,15 @@ fn read_wstr<F: FnOnce(&mut [u16]) -> i32>(cap: usize, fill: F) -> String {
 /// Determine whether `hwnd` satisfies the configured Target strategy.
 fn matches_target(hwnd: HWND, target: &Target) -> bool {
     match target {
-        Target::ByWindowClass(expected) => {
+        Target::WindowClass(expected) => {
             let class = read_wstr(256, |b| unsafe { GetClassNameW(hwnd, b) });
             &class == expected
         }
-        Target::ByTitleSubstring(substr) => {
+        Target::TitleSubstring(substr) => {
             let title = read_wstr(512, |b| unsafe { GetWindowTextW(hwnd, b) });
             title.contains(substr)
         }
-        Target::ByProcessName(name) => {
+        Target::ProcessName(name) => {
             // Resolve process name for hwnd
             let mut pid: u32 = 0;
             unsafe {
@@ -182,7 +175,7 @@ pub fn install_hooks(filter: HookFilter, cb: Arc<WinEventCallback>) -> Result<()
         .set(cb)
         .map_err(|_| anyhow!("callback already set"))?;
     FILTER
-        .set(filter)
+        .set(Mutex::new(filter))
         .map_err(|_| anyhow!("filter already set"))?;
     let events = [
         EVENT_OBJECT_SHOW,
@@ -233,27 +226,53 @@ pub fn uninstall_hooks() {
 pub fn find_existing_target() -> Option<HWND> {
     let filter = FILTER.get()?;
     unsafe {
+        // Fast path: current foreground.
         let fg = GetForegroundWindow();
-        if !fg.is_invalid() && matches_target(fg, &filter.target) {
+        if !fg.is_invalid()
+            && let Ok(g) = filter.lock()
+            && matches_target(fg, &g.target)
+        {
             return Some(fg);
         }
-        // Walk top-level windows in z-order.
-        let mut current = GetWindow(GetDesktopWindow(), GW_HWNDNEXT).ok();
-        let mut count = 0;
-        while let Some(h) = current {
-            if IsWindowVisible(h).as_bool() && GetAncestor(h, GA_ROOT) == h {
-                if matches_target(h, &filter.target) {
-                    return Some(h);
+        // Enumerate all top-level windows (reliable even if user invoked tray menu which changed foreground to the taskbar shell window).
+        struct EnumState {
+            found: Option<HWND>,
+        }
+        let mut state = EnumState { found: None };
+        use windows::Win32::Foundation::LPARAM;
+        use windows::core::BOOL;
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            unsafe {
+                let st = &mut *(lparam.0 as *mut EnumState);
+                // Skip invisible / non-root early.
+                if !IsWindowVisible(hwnd).as_bool() || GetAncestor(hwnd, GA_ROOT) != hwnd {
+                    return BOOL(1); // continue
                 }
-            }
-            current = GetWindow(h, GW_HWNDNEXT).ok();
-            count += 1;
-            if count > 4096 {
-                break;
+                if let Some(f_mtx) = FILTER.get()
+                    && let Ok(f) = f_mtx.lock()
+                    && matches_target(hwnd, &f.target)
+                {
+                    st.found = Some(hwnd);
+                    return BOOL(0); // stop enumeration
+                }
+                BOOL(1)
             }
         }
+        let lparam = LPARAM(&mut state as *mut _ as isize);
+        let _ = EnumWindows(Some(enum_proc), lparam);
+        state.found
     }
-    None
+}
+
+/// Update target dynamically after hooks installed.
+pub fn update_target(new_target: Target) -> bool {
+    if let Some(m) = FILTER.get()
+        && let Ok(mut g) = m.lock()
+    {
+        g.target = new_target;
+        return true;
+    }
+    false
 }
 
 /// Retrieve a RECT for a window using DWM frame bounds fallback to GetWindowRect.

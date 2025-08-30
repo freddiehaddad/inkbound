@@ -1,10 +1,10 @@
 # PenTarget
 
 Event‑driven (no polling) Wacom/WinTab tablet mapper for Windows. PenTarget dynamically
-re-maps your tablet to the exact bounds of a chosen window (by process name, window class,
-or title substring). When that window moves, resizes, or regains foreground focus the
-mapping is updated instantly via WinEvent hooks. Optionally the tablet reverts to the full
-area whenever another window is foreground.
+maps your tablet active area to the bounds of a chosen application window (by process name,
+window class, or title substring). When that window moves, resizes, or regains foreground
+focus the mapping is updated instantly via WinEvent hooks. A small GUI & tray icon now ship
+with the binary so you can run it without specifying a selector up front.
 
 ## Why?
 
@@ -19,13 +19,17 @@ immediately—no busy loops, timers, or artificial delays.
 
 ## Features
 
-- Target selection by process executable, window class, or title substring (exactly one required).
-- Optional aspect ratio preservation (letter/pillar boxing) or full stretch to window.
-- Automatic context reopen on foreground changes (improves reliability with some drivers).
-- Optional full-tablet mapping while target is unfocused (`--full-when-unfocused`).
-- Clean shutdown with Ctrl+C.
+- Target selection by process executable, window class, or title substring (CLI or typed into GUI).
+- Selector argument is OPTIONAL: launch with no args, type your target, press Start.
+- Change the selector at runtime: edit the text and toggle Stop → Start to switch targets.
+- Aspect ratio preservation (crop tablet area to match window aspect; no letterboxing dead zones).
+- Instant updates on move / resize / foreground / minimize / destroy (WinEvent hooks, no polling).
+- Automatic context reopen on foreground changes (works around drivers resetting mapping).
+- Tray icon with status coloring (Green = active & target present, Yellow = waiting / stopped).
+- Visible GUI with: editable selector textbox, Keep Aspect checkbox, Start/Stop button.
+- Clean shutdown: close window, Exit from tray menu, or Ctrl+C in the launching console.
 - Verbose / quiet logging controls (`-v`, `-vv`, `-q`).
-- Unit-tested core logic (mapping + context fallback).
+- Mapping + context fallback logic tested.
 
 ## Installation (Build From Source)
 
@@ -45,55 +49,92 @@ cargo build --release
 
 ## Usage
 
-Exactly one selector flag is required.
+You can (a) supply a selector on the CLI OR (b) omit it and choose later in the GUI.
+
+CLI forms (optional now):
 
 ```text
 pentarget --process photoshop.exe [options]
 pentarget --win-class Chrome_WidgetWin_1 [options]
-pentarget --title-contains Sketch [options]
+pentarget --title-contains Blender [options]
+pentarget                 # no selector -> GUI opens in idle state
 ```
 
-### Key Flags
+### Key Flags / Options
 
 - `--process <NAME>`: Match by process executable (case-insensitive).
 - `--win-class <CLASS>`: Match by exact top-level window class name.
 - `--title-contains <SUBSTR>`: Match if window title contains substring (case-sensitive).
-- `--preserve-aspect` (alias `--keep-aspect`): Maintain tablet aspect; center inside window.
-- `--full-when-unfocused`: While another window is foreground, temporarily revert to full tablet.
+- `--preserve-aspect` (alias `--keep-aspect`): Crop tablet input to keep window aspect (prevents distortion; entire window remains reachable).
 - `-v / --verbose`: Increase log verbosity (once = debug, twice = trace).
 - `-q / --quiet`: Only warnings and errors.
 
+Removed flag: `--full-when-unfocused` (behaviour replaced by consistent target mapping; may return later behind GUI control).
+
 ### Examples
 
-Preserve aspect mapping for Photoshop:
+Start with GUI only, then type a target later:
+
+```powershell
+pentarget
+```
+
+Start targeting Photoshop, keep aspect:
 
 ```powershell
 pentarget --process photoshop.exe --preserve-aspect
 ```
 
-Map to a Chrome window by class, stretch to fill (ignore aspect):
+Map to a Chrome window by class, stretch to fill:
 
 ```powershell
 pentarget --win-class Chrome_WidgetWin_1
 ```
 
-Map to a window whose title contains "Blender" and revert to full tablet when unfocused:
+Map to any window whose title contains "Blender":
 
 ```powershell
-pentarget --title-contains Blender --full-when-unfocused
+pentarget --title-contains Blender
 ```
 
-Ultra-verbose tracing for debugging:
+Trace-level diagnostics:
 
 ```powershell
 pentarget --process krita.exe -vv
 ```
 
-Quiet mode (only problems):
+Quiet mode:
 
 ```powershell
 pentarget --process sai.exe -q
 ```
+
+### Entering / Changing the Selector in the GUI
+
+Type one of the following patterns in the Target box, then (re)press Start:
+
+- `process: photoshop.exe`
+- `proc: krita.exe`
+- `class: Chrome_WidgetWin_1`
+- `title: Blender`
+- Or just free text (treated as title substring)
+
+Edits take effect when you toggle Stop → Start (this re-applies hooks and mapping).
+
+## Tray & GUI Behaviour
+
+Tray icon colors:
+
+- Green: Mapping enabled AND target currently exists.
+- Yellow: Waiting for target / mapping disabled / target disappeared.
+
+Tray menu: Right-click → Restore / Start|Stop / Exit. Double‑click tray icon to show window.
+
+Window controls:
+
+- Target textbox: Editable anytime (press Start to apply changes).
+- Keep tablet aspect: When checked, the tablet area is cropped to match window aspect to avoid distortion.
+- Start/Stop: Enables/disables dynamic mapping (Stop returns tablet to previous full-tablet context extents).
 
 ## Logging & Diagnostics
 
@@ -136,21 +177,23 @@ PenTarget to pick up the new input aspect ratio for accurate letterboxing with `
 
 ## How It Works (Brief)
 
-- `WTInfoA` fetches the default LOGCONTEXT template.
-- We attempt `WTOpenA` with a prioritized option sequence (messages + system cursor integration).
-- SetWinEvent hooks (location change, foreground, create, destroy, minimize) drive recalculations.
-- On foreground regain we close & reopen the context (some drivers reset mapping otherwise).
-- Mapping math optionally preserves aspect and centers the output extents.
+1. `WTInfoA` fetches a baseline LOGCONTEXT.
+2. Context opened with preferred option set (falls back gracefully if driver rejects flags).
+3. WinEvent hooks (create / show / destroy / location change / foreground / minimize) fire; each relevant event recomputes a LOGCONTEXT geometry.
+4. Aspect ON: build a new geometry template and reopen context (driver-friendly way to apply cropping consistently).
+5. Aspect OFF: modify extents in-place via a lightweight update call.
+6. Foreground transitions explicitly reopen to counter driver resets.
 
 ## Troubleshooting
 
-| Symptom | Potential Cause | Resolution |
-|---------|-----------------|------------|
-| No mapping change | Wrong selector / window not matched | Use `-vv` to see window events; verify process/class/title. |
-| Intermittent loss after alt-tabbing | Driver resets context | Automatic reopen should mitigate; ensure latest driver. |
-| Cursor offset / mismatch | Tablet not mapped to full desktop in driver | Set Wacom mapping to all displays and retry. |
-| App ignores pen input | Driver rejected preferred flags | Check logs for fallback option; ensure `WTOpen succeeded`. |
-| High CPU usage | Unexpected; event storm | Verify no other tool is toggling contexts. |
+| Symptom | Likely Cause | Resolution |
+|---------|--------------|-----------|
+| Target never turns green | Selector mismatch | Use `-vv`; verify process/class/title text. Try exact process name incl. `.exe`. |
+| Mapping stops after some alt-tabs | Driver reset context | Reopen already attempted; update driver; leave GUI running. |
+| Tablet area distorted | Aspect not preserved | Enable Keep tablet aspect (cropping). |
+| Cursor offset | Driver not set to full desktop mapping | Set Wacom mapping to all displays; restart PenTarget. |
+| High CPU | Unexpected event storm | Use `-vv` to inspect; ensure no other remap utilities active. |
+| Changing selector has no effect | Not toggled after edit | Press Stop then Start to apply new selector. |
 
 Enable trace logs and capture a run:
 
@@ -160,10 +203,11 @@ pentarget --process photoshop.exe -vv 2>&1 | Tee-Object -FilePath pentarget-trac
 
 ## Limitations / Notes
 
-- Windows only (Win32 + WinTab).
-- Only a subset of context flags exercised; pressure / tilt packets unaffected.
-- No rotation / inversion switches (set those in the Wacom driver).
-- Hook installation failures are logged but not fatal (partial coverage possible).
+- Windows only (Win32 + WinTab APIs).
+- Pressure / tilt packets pass through untouched.
+- Orientation / rotation handled only by the tablet driver.
+- Partial hook installation (rare) is logged but not fatal.
+- Selector changes apply on next Start (could become live in future).
 
 ## Contributing
 

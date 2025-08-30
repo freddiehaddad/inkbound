@@ -18,8 +18,10 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, Lo
 use windows::core::PCSTR;
 
 /// Wintab context handle (opaque pointer value supplied by driver).
+#[allow(clippy::upper_case_acronyms)]
 pub type HCTX = isize;
 /// Packet bitfield type.
+#[allow(clippy::upper_case_acronyms)]
 pub type WTPKT = u32;
 /// 16.16 fixed point type used by WinTab (treated opaquely here).
 pub type FIX32 = i32;
@@ -39,6 +41,7 @@ pub const CXO_MESSAGES: u32 = 0x0004; // we want window messages
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(non_snake_case)]
+#[allow(clippy::upper_case_acronyms)]
 pub struct LOGCONTEXTA {
     pub lcName: [u8; 40], // context name (null-terminated)
     pub lcOptions: u32,
@@ -100,15 +103,18 @@ struct WintabFns {
 static FNS: OnceCell<Option<WintabFns>> = OnceCell::new();
 
 /// Attempt to load (or retrieve cached) function pointers for the WinTab DLL.
+#[allow(
+    clippy::manual_c_str_literals,
+    clippy::question_mark,
+    clippy::missing_transmute_annotations
+)]
 fn load_wintab() -> Option<&'static WintabFns> {
     FNS.get_or_init(|| unsafe {
         let name = PCSTR(b"wintab32.dll\0".as_ptr());
         let h = GetModuleHandleA(name)
             .ok()
             .or_else(|| LoadLibraryA(name).ok());
-        let Some(hmod) = h else {
-            return None;
-        };
+        let hmod = h?;
         let sym = |s: &str| {
             let mut v = Vec::with_capacity(s.len() + 1);
             v.extend_from_slice(s.as_bytes());
@@ -129,11 +135,11 @@ fn load_wintab() -> Option<&'static WintabFns> {
         let get = need!("WTGetA");
         let set = need!("WTSetA");
         Some(WintabFns {
-            info: std::mem::transmute(info),
-            open: std::mem::transmute(open),
-            close: std::mem::transmute(close),
-            get: std::mem::transmute(get),
-            set: std::mem::transmute(set),
+            info: std::mem::transmute::<_, PfnWtInfoA>(info),
+            open: std::mem::transmute::<_, PfnWtOpenA>(open),
+            close: std::mem::transmute::<_, PfnWtClose>(close),
+            get: std::mem::transmute::<_, PfnWtGetA>(get),
+            set: std::mem::transmute::<_, PfnWtSetA>(set),
         })
     })
     .as_ref()

@@ -20,40 +20,62 @@ pub struct MapConfig {
 ///
 /// Behaviour:
 /// * Clamps zero/negative window dimensions to 1 to avoid invalid extents.
-/// * If `keep_aspect` is set, letter/pillar boxes the mapping inside the window while preserving
-///   the tablet input aspect according to `lcInExtX` / `lcInExtY` of the base context.
-/// * Centers the resulting output rectangle within the window bounds.
+/// * If `keep_aspect` is set, we crop the TABLET INPUT (virtually) by adjusting output extents to
+///   fill the entire window while preserving the tablet aspect (scale uniformly). This means the
+///   mapping always spans the full window rectangle; pen reaches every pixel (unused tablet edge
+///   bands map outside the window logically).
+/// * Centers the adjusted mapping if cropping is required (implemented by scaling factors only; output origin == window origin).
 /// * Mirrors output fields into system fields to keep cursor behaviour consistent.
 pub fn rect_to_logcontext(mut base: LOGCONTEXTA, rect: RECT, cfg: &MapConfig) -> LOGCONTEXTA {
     let win_w = (rect.right - rect.left).max(1);
     let win_h = (rect.bottom - rect.top).max(1);
-    let mut out_w = win_w;
-    let mut out_h = win_h;
-
+    let out_w = win_w;
+    let out_h = win_h;
     if cfg.keep_aspect {
-        let in_w = base.lcInExtX.abs().max(1);
-        let in_h = base.lcInExtY.abs().max(1);
-        let in_aspect = in_w as f64 / in_h as f64;
+        // True crop: adjust INPUT extents so aspect matches window; output always full window.
+        let in_w_full = base.lcInExtX.abs().max(1);
+        let in_h_full = base.lcInExtY.abs().max(1);
         let win_aspect = win_w as f64 / win_h as f64;
-        if win_aspect > in_aspect {
-            // window wider -> reduce width
-            out_w = (win_h as f64 * in_aspect).round() as i32;
-        } else {
-            // window taller -> reduce height
-            out_h = (win_w as f64 / in_aspect).round() as i32;
+        let tab_aspect = in_w_full as f64 / in_h_full as f64;
+        let mut in_w_new = in_w_full as f64;
+        let mut in_h_new = in_h_full as f64;
+        if win_aspect > tab_aspect {
+            // Window wider -> need higher aspect -> crop tablet height
+            in_h_new = (in_w_full as f64 / win_aspect).round().max(1.0);
+        } else if win_aspect < tab_aspect {
+            // Window taller -> crop tablet width
+            in_w_new = (in_h_full as f64 * win_aspect).round().max(1.0);
         }
+        // Center crop inside tablet input space. Preserve sign of original extents.
+        let sign_w = if base.lcInExtX < 0 { -1 } else { 1 };
+        let sign_h = if base.lcInExtY < 0 { -1 } else { 1 };
+        let in_w_new_i = in_w_new as i32;
+        let in_h_new_i = in_h_new as i32;
+        let crop_dx = (in_w_full - in_w_new_i.abs()) / 2;
+        let crop_dy = (in_h_full - in_h_new_i.abs()) / 2;
+        // Shift origins (assuming lcInOrg* initially 0; if not we offset relative to original origin).
+        if crop_dx > 0 {
+            base.lcInOrgX += crop_dx * sign_w;
+        }
+        if crop_dy > 0 {
+            base.lcInOrgY += crop_dy * sign_h;
+        }
+        base.lcInExtX = in_w_new_i * sign_w;
+        base.lcInExtY = in_h_new_i * sign_h;
+        trace!(
+            win_w,
+            win_h,
+            in_w_full,
+            in_h_full,
+            in_w_new_i,
+            in_h_new_i,
+            crop_dx,
+            crop_dy,
+            "aspect crop input adjusted"
+        );
     }
-
-    // Center inside window
-    let offset_x = (win_w - out_w) / 2;
-    let offset_y = (win_h - out_h) / 2;
-
-    base.lcOutOrgX = rect.left + offset_x;
-    base.lcOutOrgY = rect.top + offset_y;
-    trace!(
-        win_w,
-        win_h, out_w, out_h, offset_x, offset_y, "mapping centered"
-    );
+    base.lcOutOrgX = rect.left;
+    base.lcOutOrgY = rect.top;
     base.lcOutExtX = out_w;
     base.lcOutExtY = out_h;
 
@@ -78,10 +100,11 @@ mod tests {
     use windows::Win32::Foundation::RECT;
 
     fn base_ctx(in_w: i32, in_h: i32) -> LOGCONTEXTA {
-        let mut ctx = LOGCONTEXTA::default();
-        ctx.lcInExtX = in_w;
-        ctx.lcInExtY = in_h;
-        ctx
+        LOGCONTEXTA {
+            lcInExtX: in_w,
+            lcInExtY: in_h,
+            ..Default::default()
+        }
     }
 
     fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
@@ -111,33 +134,27 @@ mod tests {
     }
 
     #[test]
-    fn keep_aspect_window_wider_centers_horizontally() {
-        // Tablet is square (aspect 1). Window is wider (1.777...). Width should shrink, centered.
-        let base = base_ctx(5000, 5000);
-        let rc = rect(0, 0, 1600, 900);
+    fn keep_aspect_window_wider_crops_input_height() {
+        let base = base_ctx(5000, 5000); // square tablet
+        let rc = rect(0, 0, 1600, 900); // 16:9 window
         let cfg = MapConfig { keep_aspect: true };
         let out = rect_to_logcontext(base, rc, &cfg);
-        // Expect width reduced to window height * aspect(=1) => 900; height full 900.
-        assert_eq!(out.lcOutExtX, 900);
+        // Output fills window
+        assert_eq!(out.lcOutExtX, 1600);
         assert_eq!(out.lcOutExtY, 900);
-        // Centered: (1600 - 900)/2 = 350
-        assert_eq!(out.lcOutOrgX, 350);
-        assert_eq!(out.lcOutOrgY, 0);
+        // Input height reduced (crop) -> expect new lcInExtY < original 5000
+        assert!(out.lcInExtY < 5000);
     }
 
     #[test]
-    fn keep_aspect_window_taller_centers_vertically() {
-        // Tablet aspect 2.0 (wide). Square window 1000x1000 => height reduced.
-        let base = base_ctx(10000, 5000); // aspect 2.0
-        let rc = rect(0, 0, 1000, 1000);
+    fn keep_aspect_window_taller_crops_input_width() {
+        let base = base_ctx(10000, 5000); // wide 2:1
+        let rc = rect(0, 0, 1000, 1600); // tall window
         let cfg = MapConfig { keep_aspect: true };
         let out = rect_to_logcontext(base, rc, &cfg);
-        // width stays 1000, height becomes 500.
         assert_eq!(out.lcOutExtX, 1000);
-        assert_eq!(out.lcOutExtY, 500);
-        // Centered vertically: (1000-500)/2 = 250
-        assert_eq!(out.lcOutOrgX, 0);
-        assert_eq!(out.lcOutOrgY, 250);
+        assert_eq!(out.lcOutExtY, 1600);
+        assert!(out.lcInExtX < 10000);
     }
 
     #[test]
@@ -166,17 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn extreme_ultrawide_window_with_square_tablet() {
-        // Square tablet, ultra-wide window (32:9 example 5120x1440)
-        let base = base_ctx(6000, 6000); // aspect 1
-        let rc = rect(50, 20, 5170, 1460); // 5120 x 1440
+    fn extreme_ultrawide_window_square_tablet_crops_input_height() {
+        let base = base_ctx(6000, 6000);
+        let rc = rect(50, 20, 5170, 1460); // 5120x1440
         let cfg = MapConfig { keep_aspect: true };
         let out = rect_to_logcontext(base, rc, &cfg);
-        // Height limits; width should become 1440 (match height * 1), centered horizontally.
+        assert_eq!(out.lcOutExtX, 5120);
         assert_eq!(out.lcOutExtY, 1440);
-        assert_eq!(out.lcOutExtX, 1440);
-        // Center offset: (5120-1440)/2 = 1840
-        assert_eq!(out.lcOutOrgX, 50 + 1840);
-        assert_eq!(out.lcOutOrgY, 20);
+        assert!(out.lcInExtY < 6000);
     }
 }

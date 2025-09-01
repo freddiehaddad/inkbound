@@ -1,7 +1,7 @@
-//! Visible GUI window (optional) for lifecycle control / future status display.
+//! Visible GUI window for lifecycle control and status display.
 //!
-//! Separated from `winhost` which only provides the hidden message-only host window for
-//! WinTab + WinEvent infrastructure.
+//! This module provides the main GUI window that serves as both the user interface
+//! and the WinTab context host, eliminating the need for a separate hidden window.
 
 use anyhow::{Result, anyhow};
 use once_cell::sync::OnceCell;
@@ -612,5 +612,28 @@ pub fn get_selector_text() -> Option<String> {
         }
         let slice = &buf[..len.min(buf.len())];
         Some(String::from_utf16_lossy(slice))
+    }
+}
+
+/// Run the Windows message loop (can handle both GUI and WinTab messages).
+/// This replaces the separate winhost message loop when using the GUI window.
+pub fn run_message_loop() -> Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+    };
+
+    unsafe {
+        let mut msg = MSG::default();
+        loop {
+            let r = GetMessageW(&mut msg, None, 0, 0);
+            if r.0 == -1 {
+                return Err(anyhow!("GetMessageW failed"));
+            }
+            if r.0 == 0 {
+                return Ok(());
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 }

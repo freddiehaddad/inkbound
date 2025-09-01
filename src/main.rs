@@ -1,13 +1,13 @@
 //! Event‑driven Wacom (WinTab) tablet mapper.
 //!
-//! This binary opens a WinTab context bound to an invisible message window and dynamically
+//! This binary opens a WinTab context bound to the GUI window and dynamically
 //! remaps the tablet output area to match a user‑selected target window (process name, class
 //! name, or title substring). The mapping updates immediately in response to WinEvent hook
 //! notifications (size / move / foreground / creation events); no polling loops are used.
 //!
 //! High‑level flow:
 //! 1. Parse CLI (one required selector + behavioural flags).
-//! 2. Initialize tracing from RUST_LOG and create a hidden message‑only host window.
+//! 2. Initialize tracing from RUST_LOG and create the GUI window as WinTab host.
 //! 3. Query the default WinTab LOGCONTEXT (WTInfoA), set desired options, and open a context
 //!    with fallback if the driver rejects flags.
 //! 4. Install WinEvent hooks. A single callback applies or resets mapping as events arrive.
@@ -23,7 +23,6 @@ mod context;
 mod gui;
 mod mapping;
 mod winevent;
-mod winhost;
 mod wintab;
 
 use anyhow::Result;
@@ -33,8 +32,8 @@ use tracing::{error, info};
 
 use context::{SendHwnd, open_context_with_fallback, reopen_context, reopen_with_template};
 use gui::{
-    create_main_window, is_run_enabled, reflect_target_presence, set_aspect_toggle_callback,
-    set_run_toggle_callback,
+    create_main_window, is_run_enabled, reflect_target_presence, run_message_loop,
+    set_aspect_toggle_callback, set_run_toggle_callback,
 };
 use mapping::{MapConfig, apply_mapping, rect_to_logcontext};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -44,7 +43,6 @@ use winevent::{
     HookFilter, Target, find_existing_target, install_hooks, query_window_rect, uninstall_hooks,
     update_target,
 };
-use winhost::{create_message_window, run_message_loop};
 use wintab::{wt_close, wt_get};
 
 /// Command line interface definition.
@@ -110,13 +108,35 @@ fn main() -> Result<()> {
         "starting pentarget"
     );
 
-    let hwnd = match create_message_window("WINTAB_MAPPER_HOST") {
-        Ok(h) => h,
-        Err(e) => {
-            error!(?e, "failed to create message window");
-            return Err(e);
-        }
+    // Determine optional initial target from CLI.
+    let target_cli: Option<Target> = if let Some(p) = &cli.process {
+        Some(Target::ProcessName(p.clone()))
+    } else if let Some(c) = &cli.win_class {
+        Some(Target::WindowClass(c.clone()))
+    } else {
+        cli.title_contains
+            .as_ref()
+            .map(|t| Target::TitleSubstring(t.clone()))
     };
+
+    // Try to create the GUI window first, which will serve as our WinTab host
+    let window_title = format!("PenTarget Mapper v{}", env!("CARGO_PKG_VERSION"));
+    let selector_display = if let Some(t) = &target_cli {
+        match t {
+            Target::ProcessName(s) => format!("process: {s}"),
+            Target::WindowClass(s) => format!("class: {s}"),
+            Target::TitleSubstring(s) => format!("title: {s}"),
+        }
+    } else {
+        String::new()
+    };
+
+    let hwnd = create_main_window(
+        &window_title,
+        "Target",
+        &selector_display,
+        cli.preserve_aspect,
+    )?;
 
     let (hctx, base_ctx, final_options) = open_context_with_fallback(hwnd)?;
     let hctx_cell = Arc::new(Mutex::new(hctx));
@@ -138,41 +158,6 @@ fn main() -> Result<()> {
         })
         .expect("ctrlc handler");
     }
-
-    // Determine optional initial target from CLI.
-    let target_cli: Option<Target> = if let Some(p) = &cli.process {
-        Some(Target::ProcessName(p.clone()))
-    } else if let Some(c) = &cli.win_class {
-        Some(Target::WindowClass(c.clone()))
-    } else {
-        cli.title_contains
-            .as_ref()
-            .map(|t| Target::TitleSubstring(t.clone()))
-    };
-
-    // Build initial selector display string (always editable even when provided via CLI).
-    let selector_display = if let Some(t) = &target_cli {
-        match t {
-            Target::ProcessName(s) => format!("process: {s}"),
-            Target::WindowClass(s) => format!("class: {s}"),
-            Target::TitleSubstring(s) => format!("title: {s}"),
-        }
-    } else {
-        String::new()
-    };
-    let window_title = format!("PenTarget Mapper v{}", env!("CARGO_PKG_VERSION"));
-    let _ = match create_main_window(
-        &window_title,
-        "Target",
-        &selector_display,
-        cli.preserve_aspect,
-    ) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            error!(?e, "failed to create visible window (continuing headless)");
-            None
-        }
-    };
 
     use std::sync::atomic::{AtomicBool, Ordering};
     let keep_aspect_flag = Arc::new(AtomicBool::new(cli.preserve_aspect));
@@ -480,7 +465,7 @@ fn main() -> Result<()> {
         reflect_target_presence(HWND(std::ptr::null_mut()), false);
     }
 
-    // Loop
+    // Loop - use the GUI message loop which can handle both GUI and WinTab messages
     let _ = run_message_loop();
     // After loop exits, cleanup (if not already via Ctrl+C)
     uninstall_hooks();

@@ -40,21 +40,56 @@ use windows::Win32::UI::WindowsAndMessaging::{BM_SETCHECK, BS_AUTOCHECKBOX, Send
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 use windows::core::PCWSTR;
 
-static MAIN_CLASS: OnceCell<U16CString> = OnceCell::new();
-static SELECTOR_EDIT: AtomicIsize = AtomicIsize::new(0);
-static START_STOP_BUTTON: AtomicIsize = AtomicIsize::new(0);
-static VISIBLE_MAIN: AtomicIsize = AtomicIsize::new(0);
-// Radio button handles for selector type
-static RADIO_PROCESS: AtomicIsize = AtomicIsize::new(0);
-static RADIO_CLASS: AtomicIsize = AtomicIsize::new(0);
-static RADIO_TITLE: AtomicIsize = AtomicIsize::new(0);
-// RUN_ENABLED represents the user-controlled Start/Stop state (true = mapping active/desirable).
-static RUN_ENABLED: AtomicBool = AtomicBool::new(false);
-// TARGET_PRESENT reflects whether the target window currently exists (for tray icon coloring).
-static TARGET_PRESENT: AtomicBool = AtomicBool::new(false);
-// Optional callback invoked whenever the user toggles Start/Stop.
-static RUN_TOGGLE_CB: OnceCell<Arc<dyn Fn(bool) + Send + Sync>> = OnceCell::new();
-static ASPECT_TOGGLE_CB: OnceCell<Arc<dyn Fn(bool) + Send + Sync>> = OnceCell::new();
+/// Centralized GUI state container to replace global static variables
+pub struct GuiState {
+    /// Window class name (cached once)
+    main_class: OnceCell<U16CString>,
+    /// Handle to the selector edit control (stored as isize for thread safety)
+    selector_edit: AtomicIsize,
+    /// Handle to the start/stop button (stored as isize for thread safety)
+    start_stop_button: AtomicIsize,
+    /// Handle to the main visible window (stored as isize for thread safety)
+    visible_main: AtomicIsize,
+    /// Radio button handles for selector type (stored as isize for thread safety)
+    radio_process: AtomicIsize,
+    radio_class: AtomicIsize,
+    radio_title: AtomicIsize,
+    /// User-controlled Start/Stop state (true = mapping active/desirable)
+    run_enabled: AtomicBool,
+    /// Whether the target window currently exists (for tray icon coloring)
+    target_present: AtomicBool,
+    /// Optional callback invoked whenever the user toggles Start/Stop
+    run_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
+    /// Callback for aspect ratio toggle
+    aspect_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
+}
+
+impl GuiState {
+    /// Create a new GUI state instance with default values
+    pub fn new() -> Self {
+        Self {
+            main_class: OnceCell::new(),
+            selector_edit: AtomicIsize::new(0),
+            start_stop_button: AtomicIsize::new(0),
+            visible_main: AtomicIsize::new(0),
+            radio_process: AtomicIsize::new(0),
+            radio_class: AtomicIsize::new(0),
+            radio_title: AtomicIsize::new(0),
+            run_enabled: AtomicBool::new(false),
+            target_present: AtomicBool::new(false),
+            run_toggle_cb: OnceCell::new(),
+            aspect_toggle_cb: OnceCell::new(),
+        }
+    }
+}
+
+// Thread-safe singleton for GUI state (temporary during transition)
+static GUI_STATE: OnceCell<GuiState> = OnceCell::new();
+
+/// Get or initialize the GUI state singleton
+fn get_gui_state() -> &'static GuiState {
+    GUI_STATE.get_or_init(GuiState::new)
+}
 const ID_START_STOP: usize = 2001;
 const ID_CB_KEEP_ASPECT: usize = 2101;
 const ID_RADIO_PROCESS: usize = 2201;
@@ -172,7 +207,8 @@ pub fn set_tray_status(hwnd: HWND, status: TrayStatus) {
 }
 
 fn current_toggle_label() -> &'static str {
-    if RUN_ENABLED.load(Ordering::Relaxed) {
+    let gui_state = get_gui_state();
+    if gui_state.run_enabled.load(Ordering::Relaxed) {
         "Stop"
     } else {
         "Start"
@@ -180,10 +216,11 @@ fn current_toggle_label() -> &'static str {
 }
 
 fn perform_run_toggle() {
-    let new_state = !RUN_ENABLED.load(Ordering::Relaxed);
-    RUN_ENABLED.store(new_state, Ordering::Relaxed);
+    let gui_state = get_gui_state();
+    let new_state = !gui_state.run_enabled.load(Ordering::Relaxed);
+    gui_state.run_enabled.store(new_state, Ordering::Relaxed);
     // Update button label if visible
-    let btn_h = START_STOP_BUTTON.load(Ordering::Relaxed);
+    let btn_h = gui_state.start_stop_button.load(Ordering::Relaxed);
     if btn_h != 0
         && let Ok(w) = U16CString::from_str(if new_state { "Stop" } else { "Start" })
     {
@@ -192,7 +229,7 @@ fn perform_run_toggle() {
         }
     }
     update_tray_icon_for_state();
-    if let Some(cb) = RUN_TOGGLE_CB.get() {
+    if let Some(cb) = gui_state.run_toggle_cb.get() {
         cb(new_state);
     }
 }
@@ -296,7 +333,8 @@ unsafe extern "system" fn main_wnd_proc(
             if wparam.0 == SIZE_MINIMIZED as usize {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             } else {
-                let stored = SELECTOR_EDIT.load(Ordering::Relaxed);
+                let gui_state = get_gui_state();
+                let stored = gui_state.selector_edit.load(Ordering::Relaxed);
                 if stored != 0 {
                     let edit = HWND(stored as *mut core::ffi::c_void);
                     let mut rc = RECT::default();
@@ -312,7 +350,7 @@ unsafe extern "system" fn main_wnd_proc(
                     }
                 }
                 // Resize Start/Stop button horizontally as well.
-                let btn_stored = START_STOP_BUTTON.load(Ordering::Relaxed);
+                let btn_stored = gui_state.start_stop_button.load(Ordering::Relaxed);
                 if btn_stored != 0 {
                     let btn = HWND(btn_stored as *mut core::ffi::c_void);
                     let mut rc = RECT::default();
@@ -363,7 +401,7 @@ unsafe extern "system" fn main_wnd_proc(
                         Some(LPARAM(0)),
                     );
                     let checked = state.0 == 1; // BST_CHECKED
-                    if let Some(cb) = ASPECT_TOGGLE_CB.get() {
+                    if let Some(cb) = get_gui_state().aspect_toggle_cb.get() {
                         cb(checked);
                     }
                     LRESULT(0)
@@ -399,7 +437,7 @@ unsafe extern "system" fn main_wnd_proc(
 }
 
 fn register_main_class() -> Result<&'static U16CString> {
-    MAIN_CLASS.get_or_try_init(|| {
+    get_gui_state().main_class.get_or_try_init(|| {
         let name = U16CString::from_str("PenTargetWindow")?;
         unsafe {
             let wc = WNDCLASSW {
@@ -436,7 +474,9 @@ fn create_raw_main_window(title: &str) -> Result<HWND> {
             None,
         )?;
         let _ = ShowWindow(hwnd, SW_SHOW);
-        VISIBLE_MAIN.store(hwnd.0 as isize, Ordering::Relaxed);
+        get_gui_state()
+            .visible_main
+            .store(hwnd.0 as isize, Ordering::Relaxed);
         add_tray_icon(hwnd);
         Ok(hwnd)
     }
@@ -452,7 +492,9 @@ pub fn create_main_window(
     initial_run_enabled: bool,
 ) -> Result<HWND> {
     // Set initial run state before creating GUI
-    RUN_ENABLED.store(initial_run_enabled, Ordering::Relaxed);
+    get_gui_state()
+        .run_enabled
+        .store(initial_run_enabled, Ordering::Relaxed);
 
     let hwnd = create_raw_main_window(title)?;
     let _ = add_selector_textbox(hwnd, selector_label, selector_value);
@@ -482,7 +524,9 @@ pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<
             None,
         );
         if let Ok(hb) = hwnd_btn {
-            START_STOP_BUTTON.store(hb.0 as isize, Ordering::Relaxed);
+            get_gui_state()
+                .start_stop_button
+                .store(hb.0 as isize, Ordering::Relaxed);
         }
     }
     Ok(())
@@ -490,12 +534,13 @@ pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<
 
 /// Update tray icon + button label to reflect whether target window is active.
 pub fn reflect_target_presence(main_hwnd: HWND, present: bool) {
-    TARGET_PRESENT.store(present, Ordering::Relaxed);
+    let gui_state = get_gui_state();
+    gui_state.target_present.store(present, Ordering::Relaxed);
     update_tray_icon_for_state_with(main_hwnd);
     // Only update button label if target presence changed AND run is enabled (color may change independently).
-    let btn_h = START_STOP_BUTTON.load(Ordering::Relaxed);
+    let btn_h = gui_state.start_stop_button.load(Ordering::Relaxed);
     if btn_h != 0 {
-        let run = RUN_ENABLED.load(Ordering::Relaxed);
+        let run = gui_state.run_enabled.load(Ordering::Relaxed);
         let label = if run { "Stop" } else { "Start" };
         if let Ok(caption) = U16CString::from_str(label) {
             unsafe {
@@ -510,8 +555,9 @@ fn update_tray_icon_for_state() {
 }
 
 fn update_tray_icon_for_state_with(main_hwnd: HWND) {
-    let run = RUN_ENABLED.load(Ordering::Relaxed);
-    let present = TARGET_PRESENT.load(Ordering::Relaxed);
+    let gui_state = get_gui_state();
+    let run = gui_state.run_enabled.load(Ordering::Relaxed);
+    let present = gui_state.target_present.load(Ordering::Relaxed);
     // Updated color logic per UX: Red reserved for explicit error only (not automatic).
     // Green => enabled + present; Yellow => all other normal states (stopped, waiting, or target gone while running)
     let status = if run && present {
@@ -520,7 +566,7 @@ fn update_tray_icon_for_state_with(main_hwnd: HWND) {
         TrayStatus::Yellow
     };
     let use_hwnd = if main_hwnd.is_invalid() {
-        HWND(VISIBLE_MAIN.load(Ordering::Relaxed) as *mut _)
+        HWND(gui_state.visible_main.load(Ordering::Relaxed) as *mut _)
     } else {
         main_hwnd
     };
@@ -529,12 +575,12 @@ fn update_tray_icon_for_state_with(main_hwnd: HWND) {
 
 /// Register a callback to be invoked when Start/Stop is toggled. Ignored if already set.
 pub fn set_run_toggle_callback(cb: Arc<dyn Fn(bool) + Send + Sync>) {
-    let _ = RUN_TOGGLE_CB.set(cb);
+    let _ = get_gui_state().run_toggle_cb.set(cb);
 }
 
 /// Query whether mapping is currently enabled (user wants mapping if target exists).
 pub fn is_run_enabled() -> bool {
-    RUN_ENABLED.load(Ordering::Relaxed)
+    get_gui_state().run_enabled.load(Ordering::Relaxed)
 }
 
 /// Add a simple labeled read‑only textbox displaying the selected target spec.
@@ -576,7 +622,9 @@ pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()
             None,
         );
         if let Ok(hwnd_edit) = h_edit {
-            SELECTOR_EDIT.store(hwnd_edit.0 as isize, Ordering::Relaxed);
+            get_gui_state()
+                .selector_edit
+                .store(hwnd_edit.0 as isize, Ordering::Relaxed);
         }
     }
     Ok(())
@@ -620,9 +668,16 @@ pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> 
         let radio_title = create_radio("Title", 180, 60, ID_RADIO_TITLE, false)?;
 
         // Store handles
-        RADIO_PROCESS.store(radio_process.0 as isize, Ordering::Relaxed);
-        RADIO_CLASS.store(radio_class.0 as isize, Ordering::Relaxed);
-        RADIO_TITLE.store(radio_title.0 as isize, Ordering::Relaxed);
+        let gui_state = get_gui_state();
+        gui_state
+            .radio_process
+            .store(radio_process.0 as isize, Ordering::Relaxed);
+        gui_state
+            .radio_class
+            .store(radio_class.0 as isize, Ordering::Relaxed);
+        gui_state
+            .radio_title
+            .store(radio_title.0 as isize, Ordering::Relaxed);
 
         // Select the appropriate radio button
         const BM_SETCHECK: u32 = 0x00F1;
@@ -678,12 +733,12 @@ pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> 
 
 /// Register callback invoked when aspect checkbox toggled.
 pub fn set_aspect_toggle_callback(cb: Arc<dyn Fn(bool) + Send + Sync>) {
-    let _ = ASPECT_TOGGLE_CB.set(cb);
+    let _ = get_gui_state().aspect_toggle_cb.set(cb);
 }
 
 /// Retrieve current selector textbox contents as UTF-8 (None if control missing).
 pub fn get_selector_text() -> Option<String> {
-    let h = SELECTOR_EDIT.load(Ordering::Relaxed);
+    let h = get_gui_state().selector_edit.load(Ordering::Relaxed);
     if h == 0 {
         return None;
     }
@@ -720,11 +775,12 @@ pub fn get_selected_selector_type() -> SelectorType {
             state.0 == 1 // BST_CHECKED
         };
 
-        if check_radio(&RADIO_PROCESS) {
+        let gui_state = get_gui_state();
+        if check_radio(&gui_state.radio_process) {
             SelectorType::Process
-        } else if check_radio(&RADIO_CLASS) {
+        } else if check_radio(&gui_state.radio_class) {
             SelectorType::WindowClass
-        } else if check_radio(&RADIO_TITLE) {
+        } else if check_radio(&gui_state.radio_title) {
             SelectorType::Title
         } else {
             // Default to Process if nothing is selected (shouldn't happen)

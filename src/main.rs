@@ -32,8 +32,8 @@ use tracing::{error, info};
 
 use context::{SendHwnd, open_context_with_fallback, reopen_context, reopen_with_template};
 use gui::{
-    create_main_window, is_run_enabled, reflect_target_presence, run_message_loop,
-    set_aspect_toggle_callback, set_run_toggle_callback,
+    SelectorType, create_main_window, get_selected_selector_type, is_run_enabled,
+    reflect_target_presence, run_message_loop, set_aspect_toggle_callback, set_run_toggle_callback,
 };
 use mapping::{MapConfig, apply_mapping, rect_to_logcontext};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -121,21 +121,28 @@ fn main() -> Result<()> {
 
     // Try to create the GUI window first, which will serve as our WinTab host
     let window_title = format!("PenTarget Mapper v{}", env!("CARGO_PKG_VERSION"));
-    let selector_display = if let Some(t) = &target_cli {
+
+    // Determine selector type and display value
+    let (selector_type, selector_value) = if let Some(t) = &target_cli {
         match t {
-            Target::ProcessName(s) => format!("process: {s}"),
-            Target::WindowClass(s) => format!("class: {s}"),
-            Target::TitleSubstring(s) => format!("title: {s}"),
+            Target::ProcessName(s) => (SelectorType::Process, s.clone()),
+            Target::WindowClass(s) => (SelectorType::WindowClass, s.clone()),
+            Target::TitleSubstring(s) => (SelectorType::Title, s.clone()),
         }
     } else {
-        String::new()
+        (SelectorType::Process, String::new()) // Default to Process when no CLI selector
     };
+
+    // Determine initial run state: enabled if CLI selector provided, disabled otherwise
+    let initial_run_enabled = target_cli.is_some();
 
     let hwnd = create_main_window(
         &window_title,
         "Target",
-        &selector_display,
+        &selector_value,
         cli.preserve_aspect,
+        selector_type,
+        initial_run_enabled,
     )?;
 
     let (hctx, base_ctx, final_options) = open_context_with_fallback(hwnd)?;
@@ -306,21 +313,19 @@ fn main() -> Result<()> {
         let current_target_clone = current_target.clone();
         set_run_toggle_callback(Arc::new(move |enabled| {
             if enabled {
-                // Always parse selector text; if different from stored target, update hooks/filter.
+                // Get selector text and type from GUI
                 if let Some(sel_txt) = gui::get_selector_text() {
                     let trimmed = sel_txt.trim();
                     if !trimmed.is_empty() {
-                        let lower = trimmed.to_ascii_lowercase();
-                        let parsed = if let Some(rest) = lower.strip_prefix("process:") {
-                            Some(Target::ProcessName(rest.trim().to_string()))
-                        } else if let Some(rest) = lower.strip_prefix("proc:") {
-                            Some(Target::ProcessName(rest.trim().to_string()))
-                        } else if let Some(rest) = lower.strip_prefix("class:") {
-                            Some(Target::WindowClass(rest.trim().to_string()))
-                        } else if let Some(rest) = lower.strip_prefix("title:") {
-                            Some(Target::TitleSubstring(rest.trim().to_string()))
-                        } else {
-                            Some(Target::TitleSubstring(trimmed.to_string()))
+                        let selector_type = get_selected_selector_type();
+                        let parsed = match selector_type {
+                            SelectorType::Process => Some(Target::ProcessName(trimmed.to_string())),
+                            SelectorType::WindowClass => {
+                                Some(Target::WindowClass(trimmed.to_string()))
+                            }
+                            SelectorType::Title => {
+                                Some(Target::TitleSubstring(trimmed.to_string()))
+                            }
                         };
                         if let Some(new_target) = parsed {
                             let mut guard = current_target_clone.lock().unwrap();

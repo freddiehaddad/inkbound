@@ -8,6 +8,14 @@ use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use widestring::U16CString;
+
+/// Selector type for radio button state
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SelectorType {
+    Process,
+    WindowClass,
+    Title,
+}
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_BITFIELDS, BITMAPINFO, BITMAPV5HEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
@@ -36,8 +44,12 @@ static MAIN_CLASS: OnceCell<U16CString> = OnceCell::new();
 static SELECTOR_EDIT: AtomicIsize = AtomicIsize::new(0);
 static START_STOP_BUTTON: AtomicIsize = AtomicIsize::new(0);
 static VISIBLE_MAIN: AtomicIsize = AtomicIsize::new(0);
+// Radio button handles for selector type
+static RADIO_PROCESS: AtomicIsize = AtomicIsize::new(0);
+static RADIO_CLASS: AtomicIsize = AtomicIsize::new(0);
+static RADIO_TITLE: AtomicIsize = AtomicIsize::new(0);
 // RUN_ENABLED represents the user-controlled Start/Stop state (true = mapping active/desirable).
-static RUN_ENABLED: AtomicBool = AtomicBool::new(true);
+static RUN_ENABLED: AtomicBool = AtomicBool::new(false);
 // TARGET_PRESENT reflects whether the target window currently exists (for tray icon coloring).
 static TARGET_PRESENT: AtomicBool = AtomicBool::new(false);
 // Optional callback invoked whenever the user toggles Start/Stop.
@@ -45,6 +57,9 @@ static RUN_TOGGLE_CB: OnceCell<Arc<dyn Fn(bool) + Send + Sync>> = OnceCell::new(
 static ASPECT_TOGGLE_CB: OnceCell<Arc<dyn Fn(bool) + Send + Sync>> = OnceCell::new();
 const ID_START_STOP: usize = 2001;
 const ID_CB_KEEP_ASPECT: usize = 2101;
+const ID_RADIO_PROCESS: usize = 2201;
+const ID_RADIO_CLASS: usize = 2202;
+const ID_RADIO_TITLE: usize = 2203;
 const WM_TRAYICON: u32 = 0x0400 + 1; // custom message id
 const IDM_TRAY_RESTORE: usize = 1001;
 const IDM_TRAY_EXIT: usize = 1002;
@@ -303,7 +318,7 @@ unsafe extern "system" fn main_wnd_proc(
                     let mut rc = RECT::default();
                     if GetClientRect(hwnd, &mut rc).is_ok() {
                         let margin = 12;
-                        let btn_top = 124;
+                        let btn_top = 120;
                         let btn_height = 26;
                         let new_width = (rc.right - rc.left) - margin * 2;
                         if new_width > 60 {
@@ -352,6 +367,10 @@ unsafe extern "system" fn main_wnd_proc(
                         cb(checked);
                     }
                     LRESULT(0)
+                }
+                ID_RADIO_PROCESS | ID_RADIO_CLASS | ID_RADIO_TITLE => {
+                    // Radio button clicked - no special handling needed, just let it update selection
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
@@ -423,31 +442,38 @@ fn create_raw_main_window(title: &str) -> Result<HWND> {
     }
 }
 
-/// Create the full GUI window (selector textbox, option checkboxes, start/stop button) in one call.
+/// Create the full GUI window (selector textbox, radio buttons, option checkboxes, start/stop button) in one call.
 pub fn create_main_window(
     title: &str,
     selector_label: &str,
     selector_value: &str,
     preserve_aspect: bool,
+    selector_type: SelectorType,
+    initial_run_enabled: bool,
 ) -> Result<HWND> {
+    // Set initial run state before creating GUI
+    RUN_ENABLED.store(initial_run_enabled, Ordering::Relaxed);
+
     let hwnd = create_raw_main_window(title)?;
     let _ = add_selector_textbox(hwnd, selector_label, selector_value);
+    let _ = add_selector_radio_buttons(hwnd, selector_type);
     let _ = add_option_checkboxes(hwnd, preserve_aspect);
-    let _ = add_start_stop_button(hwnd);
+    let _ = add_start_stop_button(hwnd, initial_run_enabled);
     Ok(hwnd)
 }
 
-/// Add a Start/Stop toggle button (initial caption "Stop" because RUNNING begins true).
-pub fn add_start_stop_button(parent: HWND) -> Result<()> {
+/// Add a Start/Stop toggle button with initial caption based on run state.
+pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<()> {
     unsafe {
-        let caption = U16CString::from_str("Stop").unwrap();
+        let caption_text = if initial_run_enabled { "Stop" } else { "Start" };
+        let caption = U16CString::from_str(caption_text).unwrap();
         let hwnd_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(U16CString::from_str("BUTTON").unwrap().as_ptr()),
             PCWSTR(caption.as_ptr()),
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | (BS_PUSHBUTTON as u32)),
             12,
-            124,
+            120,
             100,
             26,
             Some(parent),
@@ -556,6 +582,66 @@ pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()
     Ok(())
 }
 
+/// Add radio buttons for selector type selection.
+pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{BS_AUTORADIOBUTTON, WS_GROUP};
+
+    unsafe {
+        // Helper to create a radio button
+        let create_radio =
+            |text: &str, x: i32, y: i32, id: usize, is_first: bool| -> Result<HWND> {
+                let wstr = U16CString::from_str(text)?;
+                let mut style =
+                    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | (BS_AUTORADIOBUTTON as u32));
+                if is_first {
+                    style = WINDOW_STYLE(style.0 | WS_GROUP.0); // First radio button starts a new group
+                }
+                let button_class = U16CString::from_str("BUTTON")?;
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    PCWSTR(button_class.as_ptr()),
+                    PCWSTR(wstr.as_ptr()),
+                    style,
+                    x,
+                    y,
+                    80, // Slightly narrower width for horizontal layout
+                    20,
+                    Some(parent),
+                    None,
+                    None,
+                    Some(std::ptr::addr_of!(id) as *const _),
+                )
+                .map_err(|e| anyhow!("Failed to create radio button: {}", e))
+            };
+
+        // Create radio buttons horizontally
+        let radio_process = create_radio("Process", 12, 60, ID_RADIO_PROCESS, true)?;
+        let radio_class = create_radio("Class", 100, 60, ID_RADIO_CLASS, false)?;
+        let radio_title = create_radio("Title", 180, 60, ID_RADIO_TITLE, false)?;
+
+        // Store handles
+        RADIO_PROCESS.store(radio_process.0 as isize, Ordering::Relaxed);
+        RADIO_CLASS.store(radio_class.0 as isize, Ordering::Relaxed);
+        RADIO_TITLE.store(radio_title.0 as isize, Ordering::Relaxed);
+
+        // Select the appropriate radio button
+        const BM_SETCHECK: u32 = 0x00F1;
+        const BST_CHECKED: usize = 1;
+        let selected_radio = match selected_type {
+            SelectorType::Process => radio_process,
+            SelectorType::WindowClass => radio_class,
+            SelectorType::Title => radio_title,
+        };
+        let _ = SendMessageW(
+            selected_radio,
+            BM_SETCHECK,
+            Some(WPARAM(BST_CHECKED)),
+            Some(LPARAM(0)),
+        );
+    }
+    Ok(())
+}
+
 /// Add two read-only state checkboxes reflecting CLI options.
 pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> {
     unsafe {
@@ -580,7 +666,7 @@ pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> 
         };
         // BM_SETCHECK expects wParam = BST_* (0/1/2)
         const BST_CHECKED: usize = 1;
-        if let Some(cb1) = make_cb("Keep tablet aspect", 70, Some(ID_CB_KEEP_ASPECT))
+        if let Some(cb1) = make_cb("Keep tablet aspect", 90, Some(ID_CB_KEEP_ASPECT))
             && preserve_aspect
         {
             let _ = SendMessageW(cb1, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), Some(LPARAM(0)));
@@ -612,6 +698,38 @@ pub fn get_selector_text() -> Option<String> {
         }
         let slice = &buf[..len.min(buf.len())];
         Some(String::from_utf16_lossy(slice))
+    }
+}
+
+/// Get the currently selected selector type from radio buttons.
+pub fn get_selected_selector_type() -> SelectorType {
+    use windows::Win32::UI::WindowsAndMessaging::BM_GETCHECK;
+
+    unsafe {
+        let check_radio = |handle: &AtomicIsize| -> bool {
+            let h = handle.load(Ordering::Relaxed);
+            if h == 0 {
+                return false;
+            }
+            let state = SendMessageW(
+                HWND(h as *mut _),
+                BM_GETCHECK,
+                Some(WPARAM(0)),
+                Some(LPARAM(0)),
+            );
+            state.0 == 1 // BST_CHECKED
+        };
+
+        if check_radio(&RADIO_PROCESS) {
+            SelectorType::Process
+        } else if check_radio(&RADIO_CLASS) {
+            SelectorType::WindowClass
+        } else if check_radio(&RADIO_TITLE) {
+            SelectorType::Title
+        } else {
+            // Default to Process if nothing is selected (shouldn't happen)
+            SelectorType::Process
+        }
     }
 }
 

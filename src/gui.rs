@@ -244,7 +244,7 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     // Ensure custom icons exist and pick yellow as default; fall back to system if creation failed.
     let hicon = unsafe { status_icon(&TrayStatus::Yellow) }.unwrap_or_default();
     nid.hIcon = hicon;
-    let tip = U16CString::from_str("PenTarget Mapper").unwrap();
+    let tip = U16CString::from_str("InkBound Mapper").unwrap();
     let slice = tip.as_slice_with_nul();
     for (i, &c) in slice.iter().enumerate() {
         if i < nid.szTip.len() {
@@ -438,7 +438,7 @@ unsafe extern "system" fn main_wnd_proc(
 
 fn register_main_class() -> Result<&'static U16CString> {
     get_gui_state().main_class.get_or_try_init(|| {
-        let name = U16CString::from_str("PenTargetWindow")?;
+        let name = U16CString::from_str("InkBoundWindow")?;
         unsafe {
             let wc = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,

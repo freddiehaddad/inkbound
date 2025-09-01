@@ -1,6 +1,6 @@
-# PenTarget
+# InkBound
 
-Event‑driven (no polling) Wacom/WinTab tablet mapper for Windows. PenTarget dynamically
+Event‑driven (no polling) Wacom/WinTab tablet mapper for Windows. InkBound dynamically
 maps your tablet active area to the bounds of a chosen application window (by process name,
 window class, or title substring). When that window moves, resizes, or regains foreground
 focus the mapping is updated instantly via WinEvent hooks. A small GUI & tray icon now ship
@@ -14,7 +14,7 @@ Traditional workflows either:
 - Manually change mappings in the Wacom control panel, or
 - Use polling utilities that introduce latency or miss rapid size changes.
 
-PenTarget listens to window events directly from the OS and applies new WinTab contexts
+InkBound listens to window events directly from the OS and applies new WinTab contexts
 immediately—no busy loops, timers, or artificial delays.
 
 ## Features
@@ -37,14 +37,14 @@ Requires Rust (stable) on Windows with the MSVC toolchain.
 
 ```powershell
 # Clone
-git clone https://github.com/freddiehaddad/pentarget.git pentarget
-cd pentarget
+git clone https://github.com/freddiehaddad/inkbound.git
+cd inkbound
 
 # Build release
 cargo build --release
 
 # Binary will be at
-./target/release/pentarget.exe
+./target/release/inkbound.exe
 ```
 
 ## Usage
@@ -54,10 +54,10 @@ You can (a) supply a selector on the CLI OR (b) omit it and choose later in the 
 CLI forms (optional now):
 
 ```text
-pentarget --process photoshop.exe [options]
-pentarget --win-class Chrome_WidgetWin_1 [options]
-pentarget --title-contains Blender [options]
-pentarget                 # no selector -> GUI opens in idle state
+inkbound --process photoshop.exe [options]
+inkbound --win-class Chrome_WidgetWin_1 [options]
+inkbound --title-contains Blender [options]
+inkbound                 # no selector -> GUI opens in idle state
 ```
 
 ### Key Flags / Options
@@ -76,37 +76,37 @@ Removed flag: `--full-when-unfocused` (behaviour replaced by consistent target m
 Start with GUI only, then type a target later:
 
 ```powershell
-pentarget
+inkbound
 ```
 
 Start targeting Photoshop, keep aspect:
 
 ```powershell
-pentarget --process photoshop.exe --preserve-aspect
+inkbound --process photoshop.exe --preserve-aspect
 ```
 
 Map to a Chrome window by class, stretch to fill:
 
 ```powershell
-pentarget --win-class Chrome_WidgetWin_1
+inkbound --win-class Chrome_WidgetWin_1
 ```
 
 Map to any window whose title contains "Blender":
 
 ```powershell
-pentarget --title-contains Blender
+inkbound --title-contains Blender
 ```
 
 Trace-level diagnostics:
 
 ```powershell
-pentarget --process krita.exe -vv
+inkbound --process krita.exe -vv
 ```
 
 Quiet mode:
 
 ```powershell
-pentarget --process sai.exe -q
+inkbound --process sai.exe -q
 ```
 
 ### Entering / Changing the Selector in the GUI
@@ -153,33 +153,33 @@ Logging uses `tracing`:
 To force a custom filter:
 
 ```powershell
-$env:RUST_LOG = "pentarget=debug"; pentarget --process photoshop.exe
+$env:RUST_LOG = "inkbound=debug"; inkbound --process photoshop.exe
 ```
 
 To inspect applied LOGCONTEXT values set:
 
 ```powershell
 $env:WINTAB_DUMP = "1"
-pentarget --process photoshop.exe -v
+inkbound --process photoshop.exe -v
 ```
 
 ## Wacom Tablet Settings Guidance
 
-PenTarget adjusts only the WinTab context extents/origins; it does *not* rotate or invert the
+InkBound adjusts only the WinTab context extents/origins; it does *not* rotate or invert the
 hardware. Ensure these control panel settings are consistent:
 
 1. Orientation: Set your desired tablet orientation (e.g., standard landscape) **in the Wacom
-   Settings**. PenTarget assumes that orientation and does not perform rotation.
+   Settings**. InkBound assumes that orientation and does not perform rotation.
 2. Mapping: Leave the tablet mapped to the **full display area** (do not confine to a single
-   monitor in the driver) for best accuracy. PenTarget constrains virtually.
-3. Screen Area: Prefer "All Displays" or the unified desktop—PenTarget will create a window-
+   monitor in the driver) for best accuracy. InkBound constrains virtually.
+3. Screen Area: Prefer "All Displays" or the unified desktop—InkBound will create a window-
    scoped logical output region inside that space.
-4. Pen Buttons / Pressure: Unaffected; PenTarget only changes coordinate scaling.
+4. Pen Buttons / Pressure: Unaffected; InkBound only changes coordinate scaling.
 5. Disable any vendor features that continuously remap the tablet to a focused app if they cause
    interference (avoid competing context changes).
 
 If you physically rotate the tablet (e.g., portrait), change it in Wacom Settings first; restart
-PenTarget to pick up the new input aspect ratio for accurate letterboxing with `--preserve-aspect`.
+InkBound to pick up the new input aspect ratio for accurate letterboxing with `--preserve-aspect`.
 
 ## How It Works (Brief)
 
@@ -197,14 +197,14 @@ PenTarget to pick up the new input aspect ratio for accurate letterboxing with `
 | Target never turns green | Selector mismatch | Use `-vv`; verify process/class/title text. Try exact process name incl. `.exe`. |
 | Mapping stops after some alt-tabs | Driver reset context | Reopen already attempted; update driver; leave GUI running. |
 | Tablet area distorted | Aspect not preserved | Enable Keep tablet aspect (cropping). |
-| Cursor offset | Driver not set to full desktop mapping | Set Wacom mapping to all displays; restart PenTarget. |
+| Cursor offset | Driver not set to full desktop mapping | Set Wacom mapping to all displays; restart InkBound. |
 | High CPU | Unexpected event storm | Use `-vv` to inspect; ensure no other remap utilities active. |
 | Changing selector has no effect | Not toggled after edit | Press Stop then Start to apply new selector. |
 
 Enable trace logs and capture a run:
 
 ```powershell
-pentarget --process photoshop.exe -vv 2>&1 | Tee-Object -FilePath pentarget-trace.txt
+inkbound --process photoshop.exe -vv 2>&1 | Tee-Object -FilePath inkbound-trace.txt
 ```
 
 ## Limitations / Notes

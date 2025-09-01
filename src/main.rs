@@ -95,14 +95,14 @@ fn main() -> Result<()> {
     info!(
         version = env!("CARGO_PKG_VERSION"),
         ?cli,
-        "starting pentarget"
+        "starting inkbound"
     );
 
     // Convert CLI arguments to selector configuration
     let selector_config = cli_to_selector_config(&cli.process, &cli.win_class, &cli.title_contains);
 
     // Try to create the GUI window first, which will serve as our WinTab host
-    let window_title = format!("PenTarget Mapper v{}", env!("CARGO_PKG_VERSION"));
+    let window_title = format!("InkBound Mapper v{}", env!("CARGO_PKG_VERSION"));
 
     // Determine initial run state: enabled if CLI selector provided, disabled otherwise
     let initial_run_enabled = selector_config.target.is_some();

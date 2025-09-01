@@ -26,7 +26,7 @@ immediately—no busy loops, timers, or artificial delays.
 - Instant updates on move / resize / foreground / minimize / destroy (WinEvent hooks, no polling).
 - Automatic context reopen on foreground changes (works around drivers resetting mapping).
 - Tray icon with status coloring (Green = active & target present, Yellow = waiting / stopped).
-- Visible GUI with: editable selector textbox, Keep Aspect checkbox, Start/Stop button.
+- Visible GUI with: radio button selector type, editable target textbox, Keep Aspect checkbox, Start/Stop button.
 - Clean shutdown: close window, Exit from tray menu, or Ctrl+C in the launching console.
 - Verbose / quiet logging controls (`-v`, `-vv`, `-q`).
 - Mapping + context fallback logic tested.
@@ -111,13 +111,18 @@ pentarget --process sai.exe -q
 
 ### Entering / Changing the Selector in the GUI
 
-Type one of the following patterns in the Target box, then (re)press Start:
+The GUI provides radio buttons to select the mapping type and an editable textbox for the target:
 
-- `process: photoshop.exe`
-- `proc: krita.exe`
-- `class: Chrome_WidgetWin_1`
-- `title: Blender`
-- Or just free text (treated as title substring)
+1. **Process Name**: Select the "Process" radio button and enter just the process name (e.g., `photoshop.exe`)
+2. **Window Title**: Select the "Window" radio button and enter the window title text (e.g., `Adobe Photoshop`)
+
+Examples:
+
+- To map to Photoshop: Select "Process" and enter `photoshop.exe`
+- To map to a specific Chrome tab: Select "Window" and enter `YouTube - Google Chrome`
+- To map to Notepad: Select "Process" and enter `notepad.exe`
+
+The program automatically detects when the target is active and begins mapping coordinates.
 
 Edits take effect when you toggle Stop → Start (this re-applies hooks and mapping).
 
@@ -132,6 +137,7 @@ Tray menu: Right-click → Restore / Start|Stop / Exit. Double‑click tray icon
 
 Window controls:
 
+- Selector Type: Radio buttons to choose between "Process" and "Window" matching modes.
 - Target textbox: Editable anytime (press Start to apply changes).
 - Keep tablet aspect: When checked, the tablet area is cropped to match window aspect to avoid distortion.
 - Start/Stop: Enables/disables dynamic mapping (Stop returns tablet to previous full-tablet context extents).

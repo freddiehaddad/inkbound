@@ -12,7 +12,7 @@ use crate::callbacks::{
     HookCallback, create_window_event_callback, install_hooks_if_target_available,
     register_gui_callbacks,
 };
-use crate::gui::reflect_target_presence;
+use crate::gui::{reflect_target_presence, set_tray_error};
 use crate::mapping::{MapConfig, apply_mapping, rect_to_logcontext};
 use crate::winevent::{find_existing_target, query_window_rect};
 use crate::wintab::LOGCONTEXTA;
@@ -32,6 +32,7 @@ pub fn setup_callbacks_and_initial_mapping(
     // Install hooks immediately only if we have a target from CLI
     if let Err(e) = install_hooks_if_target_available(app_state.clone(), cb.clone()) {
         error!(?e, "install_hooks failed");
+        set_tray_error();
     }
 
     // Register GUI callbacks
@@ -67,9 +68,11 @@ pub fn apply_initial_mapping_if_target_exists(
             if let Ok(h) = app_state.wintab_context.lock() {
                 if let Err(e) = apply_mapping(*h, &ctx) {
                     error!(?e, "initial apply_mapping failed");
+                    set_tray_error();
                 }
             } else {
                 error!("mutex poisoned during initial mapping");
+                set_tray_error();
             }
 
             reflect_target_presence(HWND(std::ptr::null_mut()), true);

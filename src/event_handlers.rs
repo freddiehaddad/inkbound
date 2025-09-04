@@ -14,7 +14,7 @@ use crate::app_state::AppState;
 use crate::context::{reopen_context, reopen_with_template};
 use crate::gui::{
     SelectorType, get_selected_selector_type, get_selector_text, is_run_enabled,
-    reflect_target_presence,
+    reflect_target_presence, set_tray_error,
 };
 use crate::mapping::{apply_mapping, rect_to_logcontext};
 use crate::winevent::{
@@ -62,6 +62,7 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
             app_state.final_options,
         )
     {
+        set_tray_error();
         return;
     }
 
@@ -78,6 +79,7 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
             rect = r2;
         } else {
             error!("failed to acquire valid rect; skipping mapping update");
+            set_tray_error();
             return;
         }
     }
@@ -134,7 +136,8 @@ fn handle_target_destroyed(app_state: &AppState) {
     if let Ok(h) = app_state.wintab_context.lock()
         && let Err(e) = apply_mapping(*h, &app_state.base_context)
     {
-        error!(?e, "reset mapping failed");
+    error!(?e, "reset mapping failed");
+    set_tray_error();
     }
 }
 
@@ -212,7 +215,7 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
     let ctx = rect_to_logcontext(app_state.base_context, rect, &config);
 
     if config.keep_aspect {
-        if reopen_with_template(
+    if reopen_with_template(
             &app_state.wintab_context,
             app_state.host_window,
             ctx,
@@ -227,10 +230,12 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
             );
         } else {
             error!("reopen_with_template failed; aspect mapping skipped");
+            set_tray_error();
         }
     } else if let Ok(h) = app_state.wintab_context.lock() {
         if let Err(e) = apply_mapping(*h, &ctx) {
             error!(?e, "apply_mapping failed");
+            set_tray_error();
         } else {
             info!(
                 left = rect.left,

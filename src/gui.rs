@@ -206,6 +206,16 @@ pub fn set_tray_status(hwnd: HWND, status: TrayStatus) {
     }
 }
 
+/// Force tray icon into error (red) state. Does not modify internal run/target flags.
+/// Subsequent normal state updates (e.g. mapping success / presence change) will overwrite it.
+pub fn set_tray_error() {
+    let hwnd = HWND(get_gui_state().visible_main.load(Ordering::Relaxed) as *mut _);
+    if hwnd.0.is_null() {
+        return;
+    }
+    set_tray_status(hwnd, TrayStatus::Red);
+}
+
 fn current_toggle_label() -> &'static str {
     let gui_state = get_gui_state();
     if gui_state.run_enabled.load(Ordering::Relaxed) {

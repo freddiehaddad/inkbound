@@ -1,225 +1,234 @@
 # InkBound
 
-Event‑driven (no polling) Wacom/WinTab tablet mapper for Windows. InkBound dynamically
-maps your tablet active area to the bounds of a chosen application window (by process name,
-window class, or title substring). When that window moves, resizes, or regains foreground
-focus the mapping is updated instantly via WinEvent hooks. A small GUI & tray icon now ship
-with the binary so you can run it without specifying a selector up front.
+> Event‑driven WinTab tablet *window mapper* for Windows, written in Rust.
 
-## Why?
+InkBound dynamically remaps your Wacom tablet's active area to a single application window
+— selected by process name, window class, or title substring — and follows it instantly as it
+moves, resizes, gains focus, minimizes, or is destroyed. No busy loops, no timers: just WinEvent
+hooks and WinTab context updates.
 
-Traditional workflows either:
+## TL;DR (Quick Start)
 
-- Map the tablet to the whole desktop (wasting active area for a single app), or
-- Manually change mappings in the Wacom control panel, or
-- Use polling utilities that introduce latency or miss rapid size changes.
+```powershell
+# Clone and build (MSVC toolchain required)
+git clone https://github.com/freddiehaddad/inkbound.git
+cd inkbound
+cargo build --release
 
-InkBound listens to window events directly from the OS and applies new WinTab contexts
-immediately—no busy loops, timers, or artificial delays.
+# Run with GUI only (choose target later)
+./target/release/inkbound.exe
+
+# Or immediately map to Photoshop keeping aspect
+./target/release/inkbound.exe --process photoshop.exe --preserve-aspect
+```
+
+## Why Another Mapper?
+
+Typical workflows either:
+
+* Map the tablet to the whole desktop (wasted precision for a single app),
+* Constantly visit the Wacom control panel, or
+* Use polling tools that miss fast resizes or add latency.
+
+InkBound fuses lightweight OS notifications (WinEvent) with direct WinTab context geometry
+updates for immediate remapping.
 
 ## Features
 
-- Target selection by process executable, window class, or title substring (CLI or typed into GUI).
-- Selector argument is OPTIONAL: launch with no args, type your target, press Start.
-- Change the selector at runtime: edit the text and toggle Stop → Start to switch targets.
-- Aspect ratio preservation (crop tablet area to match window aspect; no letterboxing dead zones).
-- Instant updates on move / resize / foreground / minimize / destroy (WinEvent hooks, no polling).
-- Automatic context reopen on foreground changes (works around drivers resetting mapping).
-- Tray icon with status coloring (Green = active & target present, Yellow = waiting / stopped).
-- Visible GUI with: radio button selector type, editable target textbox, Keep Aspect checkbox, Start/Stop button.
-- Clean shutdown: close window, Exit from tray menu, or Ctrl+C in the launching console.
-- Verbose / quiet logging controls (`-v`, `-vv`, `-q`).
-- Mapping + context fallback logic tested.
+* Zero polling: WinEvent hooks (move, size, foreground, minimize, destroy, create, show).
+* Target selection by process, window class, or title substring (CLI or GUI textbox).
+* Launch with **no arguments** → type selector → press Start.
+* Change selector: edit text, Stop → Start to apply (live update roadmap item).
+* Aspect ratio preservation (crops INPUT extents; always fills window pixels—no letterbox gaps).
+* Automatic context reopen on foreground to mitigate driver resets.
+* Tray icon (Green = active+present, Yellow = waiting/stopped; Red only on explicit error).
+* Single small GUI: radios (selector type), editable textbox, Keep Aspect checkbox, Start/Stop.
+* Clean shutdown via window close, tray Exit, or Ctrl+C.
+* Verbose logging (`-v` debug, `-vv` trace) & quiet mode (`-q`).
+* Tested fallback for finicky driver option bit combinations.
 
-## Installation (Build From Source)
+## Requirements
 
-Requires Rust (stable) on Windows with the MSVC toolchain.
+| Component | Requirement |
+|-----------|-------------|
+| OS        | Windows 10 / 11 (x64) |
+| Rust      | Stable toolchain with MSVC (`rustup default stable-x86_64-pc-windows-msvc`) |
+| Build Tools | Visual Studio Build Tools / Desktop C++ (for MSVC linker) |
+| Tablet Driver | Official **Wacom** driver (WinTab API exposed) – install before running |
+| Hardware  | Wacom tablet (other WinTab devices may work, untested) |
+
+### Install / Verify Toolchain
 
 ```powershell
-# Clone
-git clone https://github.com/freddiehaddad/inkbound.git
-cd inkbound
+# Install Rust (if missing)
+winget install Rustlang.Rustup -e  # or download from https://rustup.rs
 
-# Build release
-cargo build --release
+# Ensure MSVC host
+rustup toolchain install stable-x86_64-pc-windows-msvc
+rustup default stable-x86_64-pc-windows-msvc
 
-# Binary will be at
-./target/release/inkbound.exe
+# Confirm
+rustc -V
+cargo -V
 ```
 
-## Usage
+### Wacom Driver
 
-You can (a) supply a selector on the CLI OR (b) omit it and choose later in the GUI.
+Download / update from: <https://www.wacom.com/support/product-support/drivers>
 
-CLI forms (optional now):
+InkBound relies on the WinTab (wintab32.dll) interface the driver provides. If the driver is
+missing or incompatible you will see early errors opening the context.
+
+## Building
+
+```powershell
+git clone https://github.com/freddiehaddad/inkbound.git
+cd inkbound
+cargo build --release
+```
+
+Binary path: `target\release\inkbound.exe`
+
+Optionally install to Cargo bin dir:
+
+```powershell
+cargo install --path .
+inkbound.exe --help
+```
+
+## Usage Overview
+
+You may specify a selector up front OR launch idle and choose in the GUI.
 
 ```text
 inkbound --process photoshop.exe [options]
 inkbound --win-class Chrome_WidgetWin_1 [options]
 inkbound --title-contains Blender [options]
-inkbound                 # no selector -> GUI opens in idle state
+inkbound  # no selector => GUI idle
 ```
 
-### Key Flags / Options
+### Key Flags
 
-- `--process <NAME>`: Match by process executable (case-insensitive).
-- `--win-class <CLASS>`: Match by exact top-level window class name.
-- `--title-contains <SUBSTR>`: Match if window title contains substring (case-sensitive).
-- `--preserve-aspect` (alias `--keep-aspect`): Crop tablet input to keep window aspect (prevents distortion; entire window remains reachable).
-- `-v / --verbose`: Increase log verbosity (once = debug, twice = trace).
-- `-q / --quiet`: Only warnings and errors.
-
-Removed flag: `--full-when-unfocused` (behaviour replaced by consistent target mapping; may return later behind GUI control).
+| Flag | Meaning |
+|------|---------|
+| `--process <NAME>` | Match process executable (case‑insensitive, include `.exe`). |
+| `--win-class <CLASS>` | Match exact top‑level window class. |
+| `--title-contains <SUBSTR>` | Match if window title contains substring (case‑sensitive). |
+| `--preserve-aspect` | Crop tablet input to preserve window aspect (no distortion). |
+| `-v / -vv` | Increase verbosity (debug / trace). |
+| `-q` | Quiet (warnings + errors only). |
 
 ### Examples
 
-Start with GUI only, then type a target later:
-
 ```powershell
+# Idle GUI, pick later
 inkbound
-```
 
-Start targeting Photoshop, keep aspect:
+# Krita with aspect preserved
+inkbound --process krita.exe --preserve-aspect
 
-```powershell
-inkbound --process photoshop.exe --preserve-aspect
-```
-
-Map to a Chrome window by class, stretch to fill:
-
-```powershell
+# Chrome window by class (no aspect crop)
 inkbound --win-class Chrome_WidgetWin_1
-```
 
-Map to any window whose title contains "Blender":
+# Any window with "Blender" in title, trace logs
+inkbound --title-contains Blender -vv
 
-```powershell
-inkbound --title-contains Blender
-```
-
-Trace-level diagnostics:
-
-```powershell
-inkbound --process krita.exe -vv
-```
-
-Quiet mode:
-
-```powershell
+# Quiet mapping to SAI
 inkbound --process sai.exe -q
 ```
 
-### Entering / Changing the Selector in the GUI
+### GUI Interaction
 
-The GUI provides radio buttons to select the mapping type and an editable textbox for the target:
+1. Choose selector type via radio buttons (Process / Class / Title).
+2. Enter selector text (e.g. `photoshop.exe`).
+3. (Optional) Check *Keep tablet aspect* to crop input extents.
+4. Press *Start*.
+5. Change target later: edit text → Stop → Start.
 
-1. **Process Name**: Select the "Process" radio button and enter just the process name (e.g., `photoshop.exe`)
-2. **Window Title**: Select the "Window" radio button and enter the window title text (e.g., `Adobe Photoshop`)
+Tray menu: Right‑click → Restore / Start|Stop / Exit. Double‑click icon to restore.
 
-Examples:
+Colors:
 
-- To map to Photoshop: Select "Process" and enter `photoshop.exe`
-- To map to a specific Chrome tab: Select "Window" and enter `YouTube - Google Chrome`
-- To map to Notepad: Select "Process" and enter `notepad.exe`
+* Green – run enabled & target window currently exists.
+* Yellow – waiting / stopped / target missing.
+* Red – explicit error path (failed context reopen / mapping failure).
 
-The program automatically detects when the target is active and begins mapping coordinates.
+## Tablet Driver Configuration
 
-Edits take effect when you toggle Stop → Start (this re-applies hooks and mapping).
+InkBound only adjusts WinTab **context geometry**; it does *not* rotate, flip, or calibrate hardware.
 
-## Tray & GUI Behaviour
+Recommended driver settings (Wacom Desktop Center / Settings):
 
-Tray icon colors:
-
-- Green: Mapping enabled AND target currently exists.
-- Yellow: Waiting for target / mapping disabled / target disappeared.
-
-Tray menu: Right-click → Restore / Start|Stop / Exit. Double‑click tray icon to show window.
-
-Window controls:
-
-- Selector Type: Radio buttons to choose between "Process" and "Window" matching modes.
-- Target textbox: Editable anytime (press Start to apply changes).
-- Keep tablet aspect: When checked, the tablet area is cropped to match window aspect to avoid distortion.
-- Start/Stop: Enables/disables dynamic mapping (Stop returns tablet to previous full-tablet context extents).
+1. Orientation: Set the physical orientation you use (landscape / portrait). InkBound assumes it.
+2. Screen Area: "All Displays" or the unified desktop. (Let InkBound carve a sub‑region virtually.)
+3. Tablet Area: Full tablet. (Cropping is done logically when aspect is preserved.)
+4. Disable any driver feature that auto‑remaps to the foreground app (to avoid conflicts).
+5. If you rotate the tablet later, change it in the driver UI then restart InkBound.
 
 ## Logging & Diagnostics
 
-Logging uses `tracing`:
-
-- Default level: INFO (unless `RUST_LOG` is set or `-v/-q` overrides).
-- `-v` => DEBUG, `-vv` => TRACE.
-- `-q` overrides all and sets WARN.
-
-To force a custom filter:
+Defaults to INFO. Override:
 
 ```powershell
-$env:RUST_LOG = "inkbound=debug"; inkbound --process photoshop.exe
-```
-
-To inspect applied LOGCONTEXT values set:
-
-```powershell
-$env:WINTAB_DUMP = "1"
+# Debug
 inkbound --process photoshop.exe -v
+
+# Trace
+inkbound --process photoshop.exe -vv
+
+# Environment filter
+$env:RUST_LOG = "inkbound=debug"; inkbound --process photoshop.exe
+
+# Dump applied LOGCONTEXT state each update
+$env:WINTAB_DUMP = "1"; inkbound --process photoshop.exe -v
 ```
 
-## Wacom Tablet Settings Guidance
-
-InkBound adjusts only the WinTab context extents/origins; it does *not* rotate or invert the
-hardware. Ensure these control panel settings are consistent:
-
-1. Orientation: Set your desired tablet orientation (e.g., standard landscape) **in the Wacom
-   Settings**. InkBound assumes that orientation and does not perform rotation.
-2. Mapping: Leave the tablet mapped to the **full display area** (do not confine to a single
-   monitor in the driver) for best accuracy. InkBound constrains virtually.
-3. Screen Area: Prefer "All Displays" or the unified desktop—InkBound will create a window-
-   scoped logical output region inside that space.
-4. Pen Buttons / Pressure: Unaffected; InkBound only changes coordinate scaling.
-5. Disable any vendor features that continuously remap the tablet to a focused app if they cause
-   interference (avoid competing context changes).
-
-If you physically rotate the tablet (e.g., portrait), change it in Wacom Settings first; restart
-InkBound to pick up the new input aspect ratio for accurate letterboxing with `--preserve-aspect`.
-
-## How It Works (Brief)
-
-1. `WTInfoA` fetches a baseline LOGCONTEXT.
-2. Context opened with preferred option set (falls back gracefully if driver rejects flags).
-3. WinEvent hooks (create / show / destroy / location change / foreground / minimize) fire; each relevant event recomputes a LOGCONTEXT geometry.
-4. Aspect ON: build a new geometry template and reopen context (driver-friendly way to apply cropping consistently).
-5. Aspect OFF: modify extents in-place via a lightweight update call.
-6. Foreground transitions explicitly reopen to counter driver resets.
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Resolution |
-|---------|--------------|-----------|
-| Target never turns green | Selector mismatch | Use `-vv`; verify process/class/title text. Try exact process name incl. `.exe`. |
-| Mapping stops after some alt-tabs | Driver reset context | Reopen already attempted; update driver; leave GUI running. |
-| Tablet area distorted | Aspect not preserved | Enable Keep tablet aspect (cropping). |
-| Cursor offset | Driver not set to full desktop mapping | Set Wacom mapping to all displays; restart InkBound. |
-| High CPU | Unexpected event storm | Use `-vv` to inspect; ensure no other remap utilities active. |
-| Changing selector has no effect | Not toggled after edit | Press Stop then Start to apply new selector. |
-
-Enable trace logs and capture a run:
+Capture a trace log:
 
 ```powershell
 inkbound --process photoshop.exe -vv 2>&1 | Tee-Object -FilePath inkbound-trace.txt
 ```
 
-## Limitations / Notes
+## Architecture (Short Form)
 
-- Windows only (Win32 + WinTab APIs).
-- Pressure / tilt packets pass through untouched.
-- Orientation / rotation handled only by the tablet driver.
-- Partial hook installation (rare) is logged but not fatal.
-- Selector changes apply on next Start (could become live in future).
+1. Acquire default LOGCONTEXT via `WTInfoA`.
+2. Open context with optimistic option flags (fallback list if driver rejects).
+3. Install WinEvent hooks (create/show/destroy/location/foreground/minimize transitions).
+4. Each relevant event recomputes geometry; aspect ON => build template & reopen; aspect OFF => apply in place.
+5. Foreground switches trigger a defensive reopen (driver quirk mitigation).
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Never turns green | Selector mismatch | Use `-vv`, verify exact process (incl. `.exe`) / class / title. |
+| Area shrinks unpredictably | Competing driver foreground mapping | Disable driver auto‑app mapping features. |
+| Distorted / stretched mapping | Aspect not preserved | Enable `--preserve-aspect` / checkbox. |
+| Cursor offset | Driver mapped to partial display | Set driver mapping to all displays; restart. |
+| Stops after alt‑tabbing | Driver reset | Reopen heuristic already applied; update driver; file issue with logs. |
+| Changed selector does nothing | Not re‑started | Press Stop then Start to reapply hooks. |
+
+## Limitations
+
+* Windows only.
+* Pen pressure / tilt untouched (pass through).
+* No rotation logic; rely on driver orientation.
+* Selector edits require a restart toggle (live update planned).
+* Partial hook install tolerated (logged at trace level).
 
 ## Contributing
 
-Issues and pull requests welcome. Please include driver version, tablet model, and a trace log
-(`-vv` with `WINTAB_DUMP=1`) when reporting mapping anomalies.
+PRs and issues welcome. Please include:
+
+* Tablet model & driver version
+* Windows version (build number)
+* Whether aspect mode was on
+* Trace log (`-vv`) and, if geometry related, `WINTAB_DUMP=1`
 
 ## License
 
 MIT – see [LICENSE](./LICENSE).
+
+---
+
+Made with Rust, a few Win32 calls, and an aversion to polling. 🙂

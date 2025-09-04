@@ -17,10 +17,11 @@ use crate::mapping::{MapConfig, apply_mapping, rect_to_logcontext};
 use crate::winevent::{find_existing_target, query_window_rect};
 use crate::wintab::LOGCONTEXTA;
 
-/// Combined initialization: setup callbacks, hooks, and initial mapping
+/// Combined initialization: setup callbacks, optionally install hooks, and apply initial mapping.
 ///
-/// This function reduces Arc cloning by combining multiple initialization
-/// steps that all need access to the app_state.
+/// Encapsulates the ordered side‑effects required after creating the WinTab context and GUI.
+/// By batching them we minimize repeated `Arc` cloning boilerplate in `main` and create a
+/// single place to evolve startup behaviour.
 pub fn setup_callbacks_and_initial_mapping(
     app_state: Arc<AppState>,
     base_context: LOGCONTEXTA,
@@ -44,11 +45,11 @@ pub fn setup_callbacks_and_initial_mapping(
     cb
 }
 
-/// Apply initial mapping if target already exists
+/// Apply initial mapping if a target window already exists at startup.
 ///
-/// This function handles the complex logic of detecting existing target windows
-/// and applying initial mapping configuration. It also updates the GUI to reflect
-/// target presence status.
+/// We opportunistically map immediately so the user has a working setup before the
+/// first relevant WinEvent fires. Failures surface a tray error state but are otherwise
+/// non‑fatal.
 pub fn apply_initial_mapping_if_target_exists(
     app_state: Arc<AppState>,
     base_context: LOGCONTEXTA,

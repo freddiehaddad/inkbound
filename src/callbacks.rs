@@ -11,17 +11,29 @@ use crate::event_handlers::{handle_aspect_toggle, handle_run_toggle, handle_wind
 use crate::gui::{set_aspect_toggle_callback, set_run_toggle_callback};
 use crate::winevent::{HookFilter, install_hooks};
 
-/// Type alias for window event hook callback function
+/// Type alias for a window event hook callback function.
+///
+/// The callback receives:
+/// * `HWND` – The window whose event fired (already filtered for relevance upstream).
+/// * `u32` – The WinEvent event identifier.
+/// * `RECT` – The window bounds derived from DWM (frame inclusive) or traditional APIs.
 pub type HookCallback = Arc<dyn Fn(HWND, u32, RECT) + Send + Sync>;
 
-/// Create a window event callback that forwards to the event handler
+/// Create a window event callback that forwards to the shared event handler logic.
+///
+/// This indirection keeps hook installation agnostic of internal handler function
+/// signatures and allows easy test replacement if needed.
 pub fn create_window_event_callback(app_state: Arc<AppState>) -> HookCallback {
     Arc::new(move |hwnd: HWND, event: u32, rect: RECT| {
         handle_window_event(app_state.clone(), hwnd, event, rect);
     })
 }
 
-/// Register all GUI callbacks for the application
+/// Register all GUI callbacks (run toggle + aspect ratio) wiring them to the central
+/// event handler functions.
+///
+/// A small closure is created per callback to capture the shared `AppState`. This avoids
+/// leaking `Arc` proliferation to GUI creation code.
 pub fn register_gui_callbacks(app_state: Arc<AppState>, hook_callback: Option<HookCallback>) {
     // Register Start/Stop callback
     {
@@ -45,7 +57,10 @@ pub fn register_gui_callbacks(app_state: Arc<AppState>, hook_callback: Option<Ho
     }
 }
 
-/// Install window event hooks if a target is available
+/// Install window event hooks if (and only if) a target was supplied on the CLI.
+///
+/// If no target is present yet we skip installation; the user may later choose a target
+/// via the GUI which triggers a separate installation path.
 pub fn install_hooks_if_target_available(
     app_state: Arc<AppState>,
     callback: HookCallback,

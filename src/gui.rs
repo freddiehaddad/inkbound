@@ -40,7 +40,11 @@ use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINF
 use windows::core::PCWSTR;
 // removed SetWindowTheme usage; w! macro no longer needed
 
-/// Centralized GUI state container to replace global static variables
+/// Centralized GUI state container to replace the previous ad‑hoc global statics.
+///
+/// All window/control handles are stored as `AtomicIsize` to allow cheap cross‑thread reads
+/// (for example from callbacks) without additional locking. The GUI is still created and
+/// manipulated on the main thread; we only read identifiers elsewhere.
 pub struct GuiState {
     /// Window class name (cached once)
     main_class: OnceCell<U16CString>,
@@ -216,6 +220,7 @@ pub fn set_tray_error() {
     set_tray_status(hwnd, TrayStatus::Red);
 }
 
+/// Compute the current toggle button label based on run state.
 fn current_toggle_label() -> &'static str {
     let gui_state = get_gui_state();
     if gui_state.run_enabled.load(Ordering::Relaxed) {
@@ -227,6 +232,10 @@ fn current_toggle_label() -> &'static str {
 
 // DPI-aware font (global, recreated on DPI changes)
 static mut APP_FONT: HFONT = HFONT(0 as _);
+/// (Re)create the shared application font for the supplied DPI.
+///
+/// The font is recreated on WM_DPICHANGED and applied lazily to all controls. This keeps
+/// point size perception consistent across monitors while allowing per‑monitor awareness.
 unsafe fn recreate_font_for_dpi(dpi: u32) {
     unsafe {
         let mut lf: LOGFONTW = std::mem::zeroed();
@@ -251,6 +260,7 @@ unsafe fn recreate_font_for_dpi(dpi: u32) {
         }
     }
 }
+/// Apply the shared font to a control (no‑op if the font has not yet been created).
 fn apply_font(hwnd: HWND) {
     unsafe {
         const WM_SETFONT: u32 = 0x0030;
@@ -273,9 +283,15 @@ const BASE_BUTTON_TOP: i32 = 136; // moved up to tighten gap below checkbox
 const BASE_BUTTON_HEIGHT: i32 = 32; // slightly taller start/stop button
 const BASE_WINDOW_W: i32 = 600;
 const BASE_WINDOW_H: i32 = 360;
+/// Scale a logical (96‑DPI based) dimension to the current DPI with rounding.
 fn scale(v: i32, dpi: u32) -> i32 {
     (v * dpi as i32 + 48) / 96
 }
+/// Perform responsive layout for horizontally stretching controls.
+///
+/// Called on `WM_SIZE` and after window creation / DPI changes. The calculation is deliberately
+/// minimal: we derive available width once per pass and guard against pathological (very small)
+/// client rectangles.
 fn layout_controls(hwnd: HWND, dpi: u32) {
     let gs = get_gui_state();
     unsafe {
@@ -309,6 +325,7 @@ fn layout_controls(hwnd: HWND, dpi: u32) {
     }
 }
 
+/// Flip the run enabled flag, update UI affordances, and invoke the registered callback.
 fn perform_run_toggle() {
     let gui_state = get_gui_state();
     let new_state = !gui_state.run_enabled.load(Ordering::Relaxed);
@@ -328,6 +345,7 @@ fn perform_run_toggle() {
     }
 }
 
+/// Add (or replace) the system tray icon with the default (yellow) variant.
 unsafe fn add_tray_icon(hwnd: HWND) {
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -350,6 +368,7 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     }
 }
 
+/// Remove the tray icon (idempotent if not present).
 unsafe fn remove_tray_icon(hwnd: HWND) {
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -361,6 +380,7 @@ unsafe fn remove_tray_icon(hwnd: HWND) {
     // Icon resources created for the tray are destroyed individually when updated/removed.
 }
 
+/// Show the context menu for the tray icon at the current cursor location.
 unsafe fn show_tray_menu(hwnd: HWND) {
     let hmenu = unsafe {
         match CreatePopupMenu() {
@@ -528,6 +548,7 @@ unsafe extern "system" fn main_wnd_proc(
     }
 }
 
+/// Register the main window class (once) and return its UTF‑16 name.
 fn register_main_class() -> Result<&'static U16CString> {
     get_gui_state().main_class.get_or_try_init(|| {
         let name = U16CString::from_str("InkBoundWindow")?;
@@ -548,6 +569,7 @@ fn register_main_class() -> Result<&'static U16CString> {
 }
 
 /// Create a visible overlapped window (no controls yet). Closing it posts WM_QUIT.
+/// Create the underlying overlapped window (no child controls yet) and set up tray + font.
 fn create_raw_main_window(title: &str) -> Result<HWND> {
     let class = register_main_class()?;
     let title_u16 = U16CString::from_str(title)?;
@@ -579,6 +601,7 @@ fn create_raw_main_window(title: &str) -> Result<HWND> {
 }
 
 /// Create the full GUI window (selector textbox, radio buttons, option checkboxes, start/stop button) in one call.
+/// High‑level convenience to build the full GUI (text box, radios, checkbox, button) in order.
 pub fn create_main_window(
     title: &str,
     selector_label: &str,
@@ -601,6 +624,7 @@ pub fn create_main_window(
 }
 
 /// Add a Start/Stop toggle button with initial caption based on run state.
+/// Add the Start/Stop push button reflecting the initial run state.
 pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<()> {
     unsafe {
         let caption_text = if initial_run_enabled { "Stop" } else { "Start" };
@@ -647,10 +671,12 @@ pub fn reflect_target_presence(main_hwnd: HWND, present: bool) {
     }
 }
 
+/// Convenience wrapper when we don't already have a window handle to update.
 fn update_tray_icon_for_state() {
     update_tray_icon_for_state_with(HWND(std::ptr::null_mut()));
 }
 
+/// Update the tray icon to reflect (run_enabled, target_present) state tuple.
 fn update_tray_icon_for_state_with(main_hwnd: HWND) {
     let gui_state = get_gui_state();
     let run = gui_state.run_enabled.load(Ordering::Relaxed);
@@ -671,16 +697,19 @@ fn update_tray_icon_for_state_with(main_hwnd: HWND) {
 }
 
 /// Register a callback to be invoked when Start/Stop is toggled. Ignored if already set.
+/// Register the run toggle callback. Subsequent calls are ignored (first wins).
 pub fn set_run_toggle_callback(cb: Arc<dyn Fn(bool) + Send + Sync>) {
     let _ = get_gui_state().run_toggle_cb.set(cb);
 }
 
 /// Query whether mapping is currently enabled (user wants mapping if target exists).
+/// Return whether the user currently wants mapping active.
 pub fn is_run_enabled() -> bool {
     get_gui_state().run_enabled.load(Ordering::Relaxed)
 }
 
 /// Add a simple labeled read‑only textbox displaying the selected target spec.
+/// Add the inline label + editable textbox for specifying / editing the target selector value.
 pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()> {
     // Positions are static for now; no DPI handling yet.
     let label_w =
@@ -742,6 +771,7 @@ pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()
 }
 
 /// Add radio buttons for selector type selection.
+/// Add horizontally laid-out radio buttons selecting the interpretation of the selector textbox.
 pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{BS_AUTORADIOBUTTON, WS_GROUP};
 
@@ -812,6 +842,7 @@ pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> 
 }
 
 /// Add two read-only state checkboxes reflecting CLI options.
+/// Add option checkboxes (currently only aspect ratio preservation). Hidden-first creation avoids a bold flash.
 pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> {
     unsafe {
         // Helper to create a checkbox
@@ -852,11 +883,13 @@ pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> 
 }
 
 /// Register callback invoked when aspect checkbox toggled.
+/// Register the aspect ratio toggle callback. Ignored if already set.
 pub fn set_aspect_toggle_callback(cb: Arc<dyn Fn(bool) + Send + Sync>) {
     let _ = get_gui_state().aspect_toggle_cb.set(cb);
 }
 
 /// Retrieve current selector textbox contents as UTF-8 (None if control missing).
+/// Retrieve the current selector textbox contents (UTF‑16 -> UTF‑8). Returns empty string if control exists but has no text.
 pub fn get_selector_text() -> Option<String> {
     let h = get_gui_state().selector_edit.load(Ordering::Relaxed);
     if h == 0 {
@@ -877,6 +910,7 @@ pub fn get_selector_text() -> Option<String> {
 }
 
 /// Get the currently selected selector type from radio buttons.
+/// Determine which selector radio button is currently checked.
 pub fn get_selected_selector_type() -> SelectorType {
     use windows::Win32::UI::WindowsAndMessaging::BM_GETCHECK;
 
@@ -911,6 +945,7 @@ pub fn get_selected_selector_type() -> SelectorType {
 
 /// Run the Windows message loop (can handle both GUI and WinTab messages).
 /// This replaces the separate winhost message loop when using the GUI window.
+/// Run the main (blocking) Win32 message loop until `WM_QUIT` is received.
 pub fn run_message_loop() -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, MSG, TranslateMessage,

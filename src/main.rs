@@ -19,17 +19,17 @@
 //! Logging surfaces hook installation, mapping application, fallback behaviour, and context
 //! state (optionally via WINTAB_DUMP=1).
 
-mod app_state;
-mod callbacks;
-mod cli;
-mod context;
-mod event_handlers;
-mod gui;
-mod initialization;
-mod logging;
-mod mapping;
-mod winevent;
-mod wintab;
+mod app_state;       // Shared mutable runtime state (WinTab handle, target, aspect flag)
+mod callbacks;       // GUI & WinEvent callback registration helpers
+mod cli;             // CLI -> internal selector conversion
+mod context;         // WinTab context open / reopen fallback logic
+mod event_handlers;  // High-level responses to WinEvent + GUI events
+mod gui;             // Win32 window + controls + tray integration
+mod initialization;  // Startup orchestration (hooks + initial mapping)
+mod logging;         // Tracing subscriber configuration
+mod mapping;         // Window -> LOGCONTEXT mapping math
+mod winevent;        // WinEvent hook install / filtering
+mod wintab;          // Minimal WinTab FFI surface
 
 use anyhow::Result;
 use clap::{ArgAction, ArgGroup, Parser};
@@ -63,16 +63,16 @@ use wintab::wt_close;
 struct Cli {
     #[arg(long = "process", alias = "proc")]
     /// Match target by process executable name (case‑insensitive, e.g. "photoshop.exe").
-    process: Option<String>,
+    process: Option<String>,      // --process / --proc
     #[arg(long = "win-class", alias = "class")]
     /// Match target by exact top‑level window class name.
-    win_class: Option<String>,
+    win_class: Option<String>,    // --win-class / --class
     #[arg(long = "title-contains", alias = "title")]
     /// Match target by substring search within the window title.
-    title_contains: Option<String>,
+    title_contains: Option<String>, // --title-contains / --title
     #[arg(long = "preserve-aspect", alias = "keep-aspect")]
     /// Preserve tablet aspect ratio by CROPPING tablet input to match window aspect so the entire window is reachable (no letterboxing).
-    preserve_aspect: bool,
+    preserve_aspect: bool,        // crop input extents to preserve window aspect
     /// Increase verbosity (-v=debug, -vv=trace). Overrides RUST_LOG.
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     verbose: u8,

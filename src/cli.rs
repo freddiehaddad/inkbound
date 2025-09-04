@@ -6,17 +6,22 @@
 use crate::gui::SelectorType;
 use crate::winevent::Target;
 
-/// CLI configuration for selector and display
+/// CLI configuration distilled into the internal selector representation.
+///
+/// This is produced by `cli_to_selector_config` and feeds GUI initialization for the
+/// selector textbox & radio buttons while supplying an optional immediate target.
 pub struct SelectorConfig {
     pub selector_type: SelectorType,
     pub selector_value: String,
     pub target: Option<Target>,
 }
 
-/// Convert CLI arguments to selector configuration
+/// Convert CLI arguments to selector configuration.
 ///
-/// This eliminates repetitive pattern matching and clone operations
-/// from the main function.
+/// This eliminates repetitive pattern matching and clone operations from `main` and
+/// centralizes the decision logic that chooses which mutually‑exclusive selector the
+/// user intended (process, class, or title substring). If none specified we default to
+/// `Process` with an empty value so the GUI can be used interactively.
 pub fn cli_to_selector_config(
     process: &Option<String>,
     win_class: &Option<String>,

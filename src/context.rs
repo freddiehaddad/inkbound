@@ -25,16 +25,20 @@ unsafe impl Sync for SendHwnd {}
 /// Compute ordered fallback option sets for WTOpen attempts.
 ///
 /// Order:
-/// 1. Desired options (usually CXO_MESSAGES | CXO_SYSTEM | possibly others from driver).
-/// 2. Desired without CXO_SYSTEM (some drivers reject system cursor integration initially).
-/// 3. Minimal CXO_MESSAGES only.
+/// 1. User desired / optimistic options (usually `CXO_MESSAGES | CXO_SYSTEM`).
+/// 2. Desired minus `CXO_SYSTEM` (some drivers refuse system cursor integration initially).
+/// 3. Minimal viability: `CXO_MESSAGES` only so we still receive packet messages.
+///
+/// Keeping the order deterministic ensures predictable logging and simplifies unit testing.
 fn fallback_options(desired: u32) -> [u32; 3] {
     [desired, desired & !wintab::CXO_SYSTEM, CXO_MESSAGES]
 }
 
 /// Iterate candidate option sets invoking `try_open` until success.
 ///
-/// Returns the first successful option value or `None` if all candidates fail.
+/// The predicate receives each candidate option bitfield and returns `true` if an open
+/// succeeded. The first `true` short‑circuits iteration; returning `None` signals all
+/// variants failed.
 fn select_first_working_option<F>(desired: u32, mut try_open: F) -> Option<u32>
 where
     F: FnMut(u32) -> bool,
@@ -44,10 +48,11 @@ where
         .find(|&opts| try_open(opts))
 }
 
-/// Open a WinTab context for `hwnd`, applying a fallback sequence of option flags.
+/// Open a WinTab context for `hwnd` applying a fallback sequence of option flags.
 ///
-/// Returns the opened context handle, the (possibly modified) LOGCONTEXT used, and the
-/// final option flags that succeeded. Any failure across all attempts is surfaced as an error.
+/// Returns `(HCTX, LOGCONTEXTA, options)` where `options` is the working flag combination.
+/// The base `LOGCONTEXTA` is cloned per attempt so subsequent failures cannot mutate the
+/// previously successful context template.
 pub fn open_context_with_fallback(hwnd: HWND) -> Result<(HCTX, LOGCONTEXTA, u32)> {
     let mut base_ctx = wt_info_defcontext()?;
     base_ctx.lcOptions |= CXO_MESSAGES | wintab::CXO_SYSTEM; // desired starting flags
@@ -75,11 +80,12 @@ pub fn open_context_with_fallback(hwnd: HWND) -> Result<(HCTX, LOGCONTEXTA, u32)
     picked.ok_or_else(|| anyhow!("WTOpenA failed for all option combinations"))
 }
 
-/// Reopen an existing context after closing the previous handle, attempting the fallback
-/// sequence starting from the last known working option set.
+/// Reopen the context after closing the previous handle using the original base template.
 ///
-/// On success updates the handle in `hctx_cell` and returns true; on failure the old handle
-/// has already been closed and false is returned (caller may skip mapping update).
+/// This is invoked on certain window activation events to work around drivers that reset
+/// mapping unexpectedly when focus changes. The original `LOGCONTEXTA` template (with full
+/// tablet extents) is reused; only option bits vary during fallback. Returns `true` if a new
+/// context was opened.
 pub fn reopen_context(
     hctx_cell: &Arc<Mutex<HCTX>>,
     hwnd: SendHwnd,
@@ -115,8 +121,11 @@ pub fn reopen_context(
     }
 }
 
-/// Reopen context using a fully prepared LOGCONTEXT template (e.g. with cropped lcIn* / lcOut* fields).
-/// Similar to `reopen_context` but does not overwrite geometry fields; only iterates option fallbacks.
+/// Reopen context using an externally prepared `LOGCONTEXTA` template.
+///
+/// Unlike `reopen_context` this variant preserves caller‑provided geometry (e.g. aspect‑cropped
+/// input extents) and only cycles the option flag fallback list. Used when re‑applying mapping
+/// with aspect ratio preservation.
 pub fn reopen_with_template(
     hctx_cell: &Arc<Mutex<HCTX>>,
     hwnd: SendHwnd,

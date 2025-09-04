@@ -23,6 +23,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Window matching strategy (mutually exclusive CLI selectors).
+///
+/// Only one variant is active at a time; the GUI / CLI logic enforces exclusivity. We
+/// intentionally keep string ownership (`String`) local so callers can build instances
+/// without additional allocation juggling.
 #[derive(Clone, PartialEq)]
 pub enum Target {
     ProcessName(String),
@@ -168,8 +172,9 @@ fn process_name_from_pid(pid: u32) -> Option<String> {
 
 /// Install WinEvent hooks for the fixed event set.
 ///
-/// Stores filter + callback in OnceCell singletons (subsequent calls fail). Partial hook
-/// installation is tolerated; failures are logged but not escalated to the caller.
+/// Stores filter + callback in `OnceCell` singletons (subsequent calls fail). Partial hook
+/// installation is tolerated; failures are logged but not escalated to the caller—mapping
+/// remains functional albeit potentially less responsive to some transitions.
 pub fn install_hooks(filter: HookFilter, cb: Arc<WinEventCallback>) -> Result<()> {
     CALLBACK
         .set(cb)

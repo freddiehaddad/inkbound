@@ -25,7 +25,14 @@ use crate::wintab::wt_get;
 /// Type alias for window event hook callback function
 type HookCallback = Arc<dyn Fn(HWND, u32, RECT) + Send + Sync>;
 
-/// Handle window events (move, resize, focus, destroy, etc.)
+/// Handle a filtered window event (move, resize, foreground change, destroy, etc.).
+///
+/// This consolidates several concerns:
+/// * Target lifecycle (destroy / minimize => reset mapping to full tablet).
+/// * Degenerate rectangle repair (some events deliver 0x0 bounds temporarily).
+/// * Conditional context reopen on foreground to mitigate driver resets.
+/// * Aspect ratio logic via `apply_window_mapping`.
+/// * Tray / button UI reflection of target presence.
 pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut rect: RECT) {
     // If no target yet, ignore events
     if !app_state.has_target() {
@@ -94,7 +101,9 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
     dump_context_state_if_requested(&app_state);
 }
 
-/// Handle run/stop toggle from GUI
+/// Handle run/stop toggle from GUI.
+///
+/// Dispatches to enable / disable handlers which perform mapping and hook maintenance.
 pub fn handle_run_toggle(
     app_state: Arc<AppState>,
     enabled: bool,
@@ -107,7 +116,9 @@ pub fn handle_run_toggle(
     }
 }
 
-/// Handle aspect ratio toggle from GUI
+/// Handle aspect ratio toggle from GUI.
+///
+/// When the mapping is currently active we immediately re‑apply with the new aspect setting.
 pub fn handle_aspect_toggle(app_state: Arc<AppState>, enabled: bool) {
     app_state.set_preserve_aspect(enabled);
 
@@ -131,17 +142,23 @@ pub fn handle_aspect_toggle(app_state: Arc<AppState>, enabled: bool) {
         reflect_target_presence(HWND(std::ptr::null_mut()), true);
     }
 }
-/// Reset mapping when target is destroyed/minimized
+/// Reset mapping when target is destroyed or minimized.
+///
+/// Falls back to the original full‑tablet LOGCONTEXT so the user regains full area until
+/// a new target becomes available again.
 fn handle_target_destroyed(app_state: &AppState) {
     if let Ok(h) = app_state.wintab_context.lock()
         && let Err(e) = apply_mapping(*h, &app_state.base_context)
     {
-    error!(?e, "reset mapping failed");
-    set_tray_error();
+        error!(?e, "reset mapping failed");
+        set_tray_error();
     }
 }
 
-/// Handle enabling the mapping
+/// Handle enabling the mapping.
+///
+/// Potentially installs hooks (if previously inactive), reopens context to ensure driver
+/// state is fresh, and applies mapping immediately if the target window already exists.
 fn handle_run_enabled(app_state: &AppState, hook_callback: Option<HookCallback>) {
     // Update target from GUI input
     update_target_from_gui(app_state, hook_callback);
@@ -169,7 +186,9 @@ fn handle_run_enabled(app_state: &AppState, hook_callback: Option<HookCallback>)
     }
 }
 
-/// Handle disabling the mapping
+/// Handle disabling the mapping.
+///
+/// Reverts to full‑tablet mapping but leaves hooks installed (so the next enable is fast).
 fn handle_run_disabled(app_state: &AppState) {
     // Reset mapping to full tablet
     if let Ok(h) = app_state.wintab_context.lock() {
@@ -180,7 +199,10 @@ fn handle_run_disabled(app_state: &AppState) {
     reflect_target_presence(HWND(std::ptr::null_mut()), find_existing_target().is_some());
 }
 
-/// Update target from GUI selector input
+/// Update target from the current GUI selector input.
+///
+/// If the target type/value changed we either update the existing installed hook filter or
+/// install hooks for the first time (when the mapping was just enabled).
 fn update_target_from_gui(app_state: &AppState, hook_callback: Option<HookCallback>) {
     if let Some(sel_txt) = get_selector_text() {
         let trimmed = sel_txt.trim();
@@ -209,13 +231,16 @@ fn update_target_from_gui(app_state: &AppState, hook_callback: Option<HookCallba
     }
 }
 
-/// Apply mapping for a specific window rectangle
+/// Apply mapping for a specific window rectangle.
+///
+/// Aspect‑preserved mappings require a full context reopen with a geometry‑modified template;
+/// non‑aspect mappings apply directly via `apply_mapping` (WTSetA wrapper).
 fn apply_window_mapping(app_state: &AppState, rect: RECT) {
     let config = app_state.get_mapping_config();
     let ctx = rect_to_logcontext(app_state.base_context, rect, &config);
 
     if config.keep_aspect {
-    if reopen_with_template(
+        if reopen_with_template(
             &app_state.wintab_context,
             app_state.host_window,
             ctx,
@@ -248,7 +273,10 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
     }
 }
 
-/// Debug dump context state if WINTAB_DUMP=1
+/// Debug dump context state if `WINTAB_DUMP=1`.
+///
+/// Intended for troubleshooting geometry or driver behaviour; kept cheap by only executing
+/// when the environment variable is explicitly set.
 fn dump_context_state_if_requested(app_state: &AppState) {
     if std::env::var("WINTAB_DUMP").as_deref() == Ok("1")
         && let Ok(h) = app_state.wintab_context.lock()

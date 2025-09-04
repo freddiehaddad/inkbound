@@ -11,7 +11,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::HWND;
 
-/// Centralized application state container
+/// Centralized application state container.
+///
+/// This structure aggregates all mutable runtime state that needs to be shared across
+/// WinEvent hook callbacks, GUI event handlers, and mapping logic. It intentionally
+/// limits the number of synchronization primitives by grouping related data so we don't
+/// scatter `Arc<Mutex<..>>` throughout the codebase. Only the WinTab context handle and
+/// target specification require a mutex (they are mutated across code paths). The other
+/// pieces rely on atomics for low‐overhead reads from high‑frequency callbacks.
 pub struct AppState {
     /// WinTab context handle (thread-safe)
     pub wintab_context: Arc<Mutex<HCTX>>,
@@ -33,7 +40,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Create new application state
+    /// Create a new application state instance.
+    ///
+    /// Parameters:
+    /// * `wintab_context` – Initial WinTab context handle returned by `wt_open`.
+    /// * `base_context` – Driver default LOGCONTEXT snapshot for use as a reset/template.
+    /// * `final_options` – Option flag bitfield that succeeded during context open fallback.
+    /// * `host_window` – HWND the context is bound to (also the GUI window).
+    /// * `initial_target` – Optional pre‑selected target from CLI.
+    /// * `preserve_aspect` – Initial aspect ratio preservation preference.
     pub fn new(
         wintab_context: HCTX,
         base_context: LOGCONTEXTA,
@@ -52,31 +67,36 @@ impl AppState {
         }
     }
 
-    /// Get current mapping configuration
+    /// Get current mapping configuration (cheap copy of user‑controlled flags).
     pub fn get_mapping_config(&self) -> MapConfig {
         MapConfig {
             keep_aspect: self.preserve_aspect.load(Ordering::Relaxed),
         }
     }
 
-    /// Update aspect ratio setting
+    /// Update aspect ratio setting.
+    ///
+    /// This is atomic so GUI checkbox toggles can mutate the flag without contending
+    /// on any other shared mutex.
     pub fn set_preserve_aspect(&self, enabled: bool) {
         self.preserve_aspect.store(enabled, Ordering::Relaxed);
     }
 
-    /// Get current target (if any)
+    /// Get current target (if any).
+    ///
+    /// Returns `None` if the mutex is poisoned or no target has been set.
     pub fn get_current_target(&self) -> Option<Target> {
         self.current_target.lock().ok()?.clone()
     }
 
-    /// Set new target
+    /// Set a new target (replacing any previously stored one).
     pub fn set_current_target(&self, target: Option<Target>) {
         if let Ok(mut guard) = self.current_target.lock() {
             *guard = target;
         }
     }
 
-    /// Check if we have a target set
+    /// Check whether a target has been configured.
     pub fn has_target(&self) -> bool {
         self.current_target
             .lock()

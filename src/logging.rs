@@ -5,7 +5,13 @@
 
 use tracing::Level;
 
-/// Configure tracing subscriber based on verbosity flags
+/// Configure the tracing subscriber according to CLI verbosity flags.
+///
+/// Precedence:
+/// 1. `quiet` forces WARN+.
+/// 2. `-vv` => TRACE.
+/// 3. `-v`  => DEBUG.
+/// 4. Else INFO with optional `RUST_LOG` env filter overrides.
 pub fn configure_logging(quiet: bool, verbose: u8) {
     let builder = tracing_subscriber::fmt::Subscriber::builder();
 

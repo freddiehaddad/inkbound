@@ -146,6 +146,10 @@ fn load_wintab() -> Option<&'static WintabFns> {
 }
 
 /// Retrieve the driver-provided default LOGCONTEXT template.
+/// Retrieve the driver-provided default LOGCONTEXT template (best‑effort).
+///
+/// Some drivers may return a partially filled structure; we still proceed since most fields
+/// of interest (tablet input extents) are typically present.
 pub fn wt_info_defcontext() -> Result<LOGCONTEXTA> {
     let f = load_wintab().ok_or_else(|| anyhow!("wintab32.dll not available"))?;
     let mut ctx = LOGCONTEXTA::default();
@@ -158,6 +162,7 @@ pub fn wt_info_defcontext() -> Result<LOGCONTEXTA> {
 }
 
 /// Open a WinTab context for the given window handle.
+/// Open a WinTab context for the given window handle using the supplied context template.
 pub fn wt_open(hwnd: HWND, ctx: &LOGCONTEXTA) -> Result<HCTX> {
     let f = load_wintab().ok_or_else(|| anyhow!("wintab32.dll not available"))?;
     let h = unsafe { (f.open)(hwnd, ctx as *const _, 1) };

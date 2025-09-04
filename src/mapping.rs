@@ -11,6 +11,9 @@ use tracing::trace;
 use windows::Win32::Foundation::RECT;
 
 /// Mapping configuration flags.
+///
+/// Additional options could be added here over time (e.g. margin padding, input rotation)
+/// without needing to thread many independent booleans through function signatures.
 #[derive(Copy, Clone)]
 pub struct MapConfig {
     pub keep_aspect: bool,

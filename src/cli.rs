@@ -5,6 +5,42 @@
 
 use crate::gui::SelectorType;
 use crate::winevent::Target;
+use clap::{ArgAction, ArgGroup, Parser};
+
+/// Raw CLI arguments definition (legacy transitional form).
+///
+/// This currently mirrors the original single-level flag interface. It is
+/// separated from `main.rs` to prepare for the upcoming subcommand / inference
+/// overhaul without bloating the entrypoint file.
+#[derive(Parser, Debug)]
+#[command(
+    version,
+    about = concat!(
+        env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION"),
+        " - Map a Wacom tablet area dynamically to a chosen window (process, class, or title) without polling.",
+    ),
+    group = ArgGroup::new("selector").required(false).args(["process", "win_class", "title_contains"])
+)]
+pub struct Cli {
+    #[arg(long = "process", alias = "proc")]
+    /// Match target by process executable name (case‑insensitive, e.g. "photoshop.exe").
+    pub process: Option<String>, // --process / --proc
+    #[arg(long = "win-class", alias = "class")]
+    /// Match target by exact top‑level window class name.
+    pub win_class: Option<String>, // --win-class / --class
+    #[arg(long = "title-contains", alias = "title")]
+    /// Match target by substring search within the window title.
+    pub title_contains: Option<String>, // --title-contains / --title
+    #[arg(long = "preserve-aspect", alias = "keep-aspect")]
+    /// Preserve tablet aspect ratio by CROPPING tablet input to match window aspect so the entire window is reachable (no letterboxing).
+    pub preserve_aspect: bool, // crop input extents to preserve window aspect
+    /// Increase verbosity (-v=debug, -vv=trace). Overrides RUST_LOG.
+    #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
+    pub verbose: u8,
+    /// Quiet mode: only warnings and errors. Overrides -v and RUST_LOG.
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+}
 
 /// CLI configuration distilled into the internal selector representation.
 ///

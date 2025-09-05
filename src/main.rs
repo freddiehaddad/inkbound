@@ -19,25 +19,25 @@
 //! Logging surfaces hook installation, mapping application, fallback behaviour, and context
 //! state (optionally via WINTAB_DUMP=1).
 
-mod app_state;       // Shared mutable runtime state (WinTab handle, target, aspect flag)
-mod callbacks;       // GUI & WinEvent callback registration helpers
-mod cli;             // CLI -> internal selector conversion
-mod context;         // WinTab context open / reopen fallback logic
-mod event_handlers;  // High-level responses to WinEvent + GUI events
-mod gui;             // Win32 window + controls + tray integration
-mod initialization;  // Startup orchestration (hooks + initial mapping)
-mod logging;         // Tracing subscriber configuration
-mod mapping;         // Window -> LOGCONTEXT mapping math
-mod winevent;        // WinEvent hook install / filtering
-mod wintab;          // Minimal WinTab FFI surface
+mod app_state; // Shared mutable runtime state (WinTab handle, target, aspect flag)
+mod callbacks; // GUI & WinEvent callback registration helpers
+mod cli; // CLI -> internal selector conversion
+mod context; // WinTab context open / reopen fallback logic
+mod event_handlers; // High-level responses to WinEvent + GUI events
+mod gui; // Win32 window + controls + tray integration
+mod initialization; // Startup orchestration (hooks + initial mapping)
+mod logging; // Tracing subscriber configuration
+mod mapping; // Window -> LOGCONTEXT mapping math
+mod winevent; // WinEvent hook install / filtering
+mod wintab; // Minimal WinTab FFI surface
 
 use anyhow::Result;
-use clap::{ArgAction, ArgGroup, Parser};
+use clap::Parser;
 use std::sync::Arc;
 use tracing::info;
 
 use app_state::AppState;
-use cli::cli_to_selector_config;
+use cli::{Cli, cli_to_selector_config};
 use context::open_context_with_fallback;
 use gui::{create_main_window, run_message_loop};
 use initialization::setup_callbacks_and_initial_mapping;
@@ -48,38 +48,6 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
 use winevent::uninstall_hooks;
 use wintab::wt_close;
-
-/// Command line interface definition.
-#[derive(Parser, Debug)]
-#[command(
-    version,
-    about = concat!(
-        env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION"),
-        " - Map a Wacom tablet area dynamically to a chosen window (process, class, or title) without polling.",
-    ),
-    // Selector group no longer required to allow GUI-based selection.
-    group = ArgGroup::new("selector").required(false).args(["process", "win_class", "title_contains"])
-)]
-struct Cli {
-    #[arg(long = "process", alias = "proc")]
-    /// Match target by process executable name (case‑insensitive, e.g. "photoshop.exe").
-    process: Option<String>,      // --process / --proc
-    #[arg(long = "win-class", alias = "class")]
-    /// Match target by exact top‑level window class name.
-    win_class: Option<String>,    // --win-class / --class
-    #[arg(long = "title-contains", alias = "title")]
-    /// Match target by substring search within the window title.
-    title_contains: Option<String>, // --title-contains / --title
-    #[arg(long = "preserve-aspect", alias = "keep-aspect")]
-    /// Preserve tablet aspect ratio by CROPPING tablet input to match window aspect so the entire window is reachable (no letterboxing).
-    preserve_aspect: bool,        // crop input extents to preserve window aspect
-    /// Increase verbosity (-v=debug, -vv=trace). Overrides RUST_LOG.
-    #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
-    verbose: u8,
-    /// Quiet mode: only warnings and errors. Overrides -v and RUST_LOG.
-    #[arg(short = 'q', long = "quiet")]
-    quiet: bool,
-}
 
 /// Program entry point.
 ///

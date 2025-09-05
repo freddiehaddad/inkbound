@@ -16,6 +16,7 @@ pub enum SelectorType {
     WindowClass,
     Title,
 }
+use crate::events::{EventSeverity, UiEvent, format_event_line, push_rate_limited, push_ui_event};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BACKGROUND_MODE, BI_BITFIELDS, BITMAPINFO, BITMAPV5HEADER, CLEARTYPE_QUALITY, COLOR_WINDOW,
@@ -29,11 +30,12 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
-    CreateWindowExW, DefWindowProcW, DestroyIcon, ES_AUTOHSCROLL, GetClientRect, GetCursorPos,
-    HMENU, MF_STRING, MoveWindow, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE,
-    SW_SHOW, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TrackPopupMenu,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_PAINT, WM_SIZE, WNDCLASSW,
-    WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
+    ES_READONLY, GetClientRect, GetCursorPos, HMENU, MF_STRING, MoveWindow, PostQuitMessage,
+    RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_PAINT, WM_SIZE, WNDCLASSW, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{BM_SETCHECK, BS_AUTOCHECKBOX, SendMessageW};
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
@@ -66,6 +68,9 @@ pub struct GuiState {
     run_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
     /// Callback for aspect ratio toggle
     aspect_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
+    /// Handle to the events feed edit control
+    events_edit: AtomicIsize,
+    wait_timer_active: AtomicBool,
 }
 
 impl GuiState {
@@ -83,6 +88,8 @@ impl GuiState {
             target_present: AtomicBool::new(false),
             run_toggle_cb: OnceCell::new(),
             aspect_toggle_cb: OnceCell::new(),
+            events_edit: AtomicIsize::new(0),
+            wait_timer_active: AtomicBool::new(false),
         }
     }
 }
@@ -104,6 +111,7 @@ const IDM_TRAY_RESTORE: usize = 1001;
 const IDM_TRAY_EXIT: usize = 1002;
 const IDM_TRAY_TOGGLE: usize = 1003; // dynamic Start/Stop
 const TRAY_UID: u32 = 1;
+const WAIT_TIMER_ID: usize = 0x9001;
 
 /// Public status variants (currently only color coded square icons).
 #[allow(dead_code)]
@@ -320,6 +328,29 @@ fn layout_controls(hwnd: HWND, dpi: u32) {
                     let _ =
                         MoveWindow(HWND(b as *mut _), margin, btn_top, total_width, btn_h, true);
                 }
+                // Events panel (fills remaining space below button)
+                let ev = gs.events_edit.load(Ordering::Relaxed);
+                if ev != 0 {
+                    let events_top = btn_top + btn_h + scale(12, dpi);
+                    let mut rc2 = RECT::default();
+                    if GetClientRect(hwnd, &mut rc2).is_ok() {
+                        let remaining_h = (rc2.bottom - rc2.top) - events_top - margin;
+                        let min_h = scale(60, dpi);
+                        let final_h = if remaining_h < min_h {
+                            min_h
+                        } else {
+                            remaining_h
+                        };
+                        let _ = MoveWindow(
+                            HWND(ev as *mut _),
+                            margin,
+                            events_top,
+                            total_width,
+                            final_h,
+                            true,
+                        );
+                    }
+                }
             }
         }
     }
@@ -436,10 +467,16 @@ unsafe extern "system" fn main_wnd_proc(
             }
             LRESULT(0)
         },
-        // WM_CTLCOLORSTATIC (0x0138) -> transparent so label blends; do not override WM_CTLCOLORBTN (0x0135)
+        // WM_CTLCOLORSTATIC (0x0138) -> labels transparent; events EDIT opaque (avoid ClearType bold overdraw)
         0x0138 => unsafe {
             let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as isize as *mut _);
-            let _ = SetBkMode(hdc, BACKGROUND_MODE(1)); // TRANSPARENT
+            let ctrl_hwnd = HWND(lparam.0 as *mut _);
+            let events_hwnd = HWND(get_gui_state().events_edit.load(Ordering::Relaxed) as *mut _);
+            if ctrl_hwnd.0 == events_hwnd.0 {
+                let _ = SetBkMode(hdc, BACKGROUND_MODE(2)); // OPAQUE
+            } else {
+                let _ = SetBkMode(hdc, BACKGROUND_MODE(1)); // TRANSPARENT
+            }
             let brush = GetSysColorBrush(COLOR_WINDOW);
             LRESULT(brush.0 as isize)
         },
@@ -473,8 +510,23 @@ unsafe extern "system" fn main_wnd_proc(
                     apply_font(HWND(h as *mut _));
                 }
             }
+            push_ui_event(EventSeverity::Info, format!("DPI change: {new_dpi}"));
             LRESULT(0)
         },
+        0x0113 => {
+            // WM_TIMER
+            let timer_id = wparam.0;
+            if timer_id == WAIT_TIMER_ID && is_run_enabled() && !is_target_present() {
+                use std::time::Duration;
+                push_rate_limited(
+                    "wait_target",
+                    Duration::from_secs(5),
+                    EventSeverity::Info,
+                    "Waiting for target...",
+                );
+            }
+            LRESULT(0)
+        }
         WM_CLOSE => unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
@@ -535,6 +587,8 @@ unsafe extern "system" fn main_wnd_proc(
             }
         },
         WM_DESTROY => unsafe {
+            // Ensure timer cleaned up
+            stop_wait_timer();
             if !APP_FONT.0.is_null() {
                 let _ = DeleteObject(HGDIOBJ(APP_FONT.0));
                 APP_FONT = HFONT(0 as _);
@@ -620,6 +674,7 @@ pub fn create_main_window(
     let _ = add_selector_radio_buttons(hwnd, selector_type);
     let _ = add_option_checkboxes(hwnd, preserve_aspect);
     let _ = add_start_stop_button(hwnd, initial_run_enabled);
+    let _ = add_events_panel(hwnd);
     Ok(hwnd)
 }
 
@@ -651,6 +706,111 @@ pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<
         }
     }
     Ok(())
+}
+
+/// Add the multiline read-only events panel (initially empty, resizes with window).
+pub fn add_events_panel(parent: HWND) -> Result<()> {
+    unsafe {
+        // Initial placeholder geometry; will be stretched in layout_controls.
+        let style = WINDOW_STYLE(
+            WS_CHILD.0
+                | WS_VISIBLE.0
+                | WS_VSCROLL.0
+                | (ES_MULTILINE as u32)
+                | (ES_AUTOVSCROLL as u32)
+                | (ES_READONLY as u32),
+        );
+        let hwnd_edit = CreateWindowExW(
+            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
+            PCWSTR(U16CString::from_str("EDIT").unwrap().as_ptr()),
+            PCWSTR(U16CString::from_str("").unwrap().as_ptr()),
+            style,
+            16,
+            200,
+            400,
+            120,
+            Some(parent),
+            None,
+            None,
+            None,
+        );
+        if let Ok(h) = hwnd_edit {
+            get_gui_state()
+                .events_edit
+                .store(h.0 as isize, Ordering::Relaxed);
+            apply_font(h);
+        }
+    }
+    Ok(())
+}
+
+/// Append a formatted event line to the events panel (if present). Auto-scrolls to end.
+pub fn append_event_line(ev: &UiEvent) {
+    let h = get_gui_state().events_edit.load(Ordering::Relaxed);
+    if h == 0 {
+        return;
+    }
+    let hwnd = HWND(h as *mut _);
+    let line = format!("{}\r\n", format_event_line(ev));
+    // Select end
+    unsafe {
+        // Using explicit length instead of -1/-1 sentinel prevents occasional repaint glitches
+        // where rapid successive EM_REPLACESEL calls appear to overdraw in place.
+        // Sequence: length -> EM_SETSEL(len,len) -> EM_REPLACESEL -> EM_SCROLLCARET.
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowTextLengthW;
+        const EM_SETSEL: u32 = 0x00B1; // (start,end)
+        const EM_REPLACESEL: u32 = 0x00C2; // append selected
+        const EM_SCROLLCARET: u32 = 0x00B7; // ensure caret/viewport scrolls
+        let len = GetWindowTextLengthW(hwnd) as usize;
+        let _ = SendMessageW(
+            hwnd,
+            EM_SETSEL,
+            Some(WPARAM(len)),
+            Some(LPARAM(len as isize)),
+        );
+        if let Ok(w) = U16CString::from_str(line) {
+            let _ = SendMessageW(
+                hwnd,
+                EM_REPLACESEL,
+                Some(WPARAM(1)),
+                Some(LPARAM(w.as_ptr() as isize)),
+            );
+            let _ = SendMessageW(hwnd, EM_SCROLLCARET, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+    }
+}
+
+/// Start periodic waiting timer (5s rate-limited emission) if not already running.
+pub fn start_wait_timer(hwnd: HWND) {
+    unsafe {
+        let gs = get_gui_state();
+        if !gs.wait_timer_active.load(Ordering::Relaxed) {
+            use windows::Win32::UI::WindowsAndMessaging::SetTimer;
+            if SetTimer(Some(hwnd), WAIT_TIMER_ID, 1000, None) != 0 {
+                gs.wait_timer_active.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Stop waiting timer if active.
+pub fn stop_wait_timer() {
+    unsafe {
+        let gs = get_gui_state();
+        if gs.wait_timer_active.load(Ordering::Relaxed) {
+            let hwnd = HWND(gs.visible_main.load(Ordering::Relaxed) as *mut _);
+            if !hwnd.0.is_null() {
+                use windows::Win32::UI::WindowsAndMessaging::KillTimer;
+                let _ = KillTimer(Some(hwnd), WAIT_TIMER_ID);
+            }
+            gs.wait_timer_active.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Public accessor for target_present flag.
+pub fn is_target_present() -> bool {
+    get_gui_state().target_present.load(Ordering::Relaxed)
 }
 
 /// Update tray icon + button label to reflect whether target window is active.

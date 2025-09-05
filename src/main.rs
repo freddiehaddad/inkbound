@@ -24,6 +24,7 @@ mod callbacks; // GUI & WinEvent callback registration helpers
 mod cli; // CLI -> internal selector conversion
 mod context; // WinTab context open / reopen fallback logic
 mod event_handlers; // High-level responses to WinEvent + GUI events
+mod events; // High-signal GUI event feed (non-debug logging replacement).
 mod gui; // Win32 window + controls + tray integration
 mod initialization; // Startup orchestration (hooks + initial mapping)
 mod logging; // Tracing subscriber configuration
@@ -39,7 +40,8 @@ use tracing::info;
 use app_state::AppState;
 use cli::{Cli, cli_to_selector_config};
 use context::open_context_with_fallback;
-use gui::{create_main_window, run_message_loop};
+use events::{EventSeverity, push_ui_event, set_event_sink};
+use gui::{append_event_line, create_main_window, run_message_loop};
 use initialization::setup_callbacks_and_initial_mapping;
 use logging::configure_logging;
 use mapping::MapConfig;
@@ -83,6 +85,13 @@ fn main() -> Result<()> {
         selector_config.selector_type,
         initial_run_enabled,
     )?;
+
+    // Register event sink now that GUI edit control exists.
+    set_event_sink(|ev| {
+        append_event_line(ev);
+    });
+    // Emit initial GUI startup event.
+    push_ui_event(EventSeverity::Info, "GUI initialized");
 
     let (hctx, base_ctx, final_options) = open_context_with_fallback(hwnd)?;
 

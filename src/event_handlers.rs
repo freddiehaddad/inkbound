@@ -3,7 +3,10 @@
 //! This module extracts the complex callback logic from main.rs into
 //! well-structured, testable functions.
 
+use crate::events::{EventSeverity, push_ui_event};
+use once_cell::sync::OnceCell;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tracing::{error, info};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -13,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app_state::AppState;
 use crate::context::{reopen_context, reopen_with_template};
 use crate::gui::{
-    SelectorType, get_selected_selector_type, get_selector_text, is_run_enabled,
-    reflect_target_presence, set_tray_error,
+    SelectorType, get_selected_selector_type, get_selector_text, is_run_enabled, is_target_present,
+    reflect_target_presence, set_tray_error, start_wait_timer, stop_wait_timer,
 };
 use crate::mapping::{apply_mapping, rect_to_logcontext};
 use crate::winevent::{
@@ -52,6 +55,8 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
     if event == EVENT_OBJECT_DESTROY || event == EVENT_SYSTEM_MINIMIZESTART {
         handle_target_destroyed(&app_state);
         reflect_target_presence(HWND(std::ptr::null_mut()), false);
+        push_ui_event(EventSeverity::Info, "Target lost");
+        start_wait_timer(app_state.host_window.0);
         return;
     }
 
@@ -70,6 +75,7 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
         )
     {
         set_tray_error();
+        push_ui_event(EventSeverity::Error, "Context reopen failed (foreground)");
         return;
     }
 
@@ -96,6 +102,11 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
 
     // Update UI to show target is present
     reflect_target_presence(HWND(std::ptr::null_mut()), true);
+    stop_wait_timer();
+    if !is_target_present() {
+        // if previously absent
+        push_ui_event(EventSeverity::Info, "Target appeared");
+    }
 
     // Optional debug dump
     dump_context_state_if_requested(&app_state);
@@ -140,6 +151,10 @@ pub fn handle_aspect_toggle(app_state: Arc<AppState>, enabled: bool) {
             "aspect toggle re-mapped"
         );
         reflect_target_presence(HWND(std::ptr::null_mut()), true);
+        push_ui_event(
+            EventSeverity::Info,
+            format!("Aspect mode {}", if enabled { "ON" } else { "OFF" }),
+        );
     }
 }
 /// Reset mapping when target is destroyed or minimized.
@@ -152,6 +167,7 @@ fn handle_target_destroyed(app_state: &AppState) {
     {
         error!(?e, "reset mapping failed");
         set_tray_error();
+        push_ui_event(EventSeverity::Error, "Mapping reset failed");
     }
 }
 
@@ -177,12 +193,16 @@ fn handle_run_enabled(app_state: &AppState, hook_callback: Option<HookCallback>)
             apply_window_mapping(app_state, rect);
             info!("run re-enabled mapping applied");
             reflect_target_presence(HWND(std::ptr::null_mut()), true);
+            stop_wait_timer();
+            push_ui_event(EventSeverity::Info, "Start enabled");
         } else {
             reflect_target_presence(HWND(std::ptr::null_mut()), false);
+            start_wait_timer(app_state.host_window.0);
         }
     } else {
         // No target yet; show waiting state
         reflect_target_presence(HWND(std::ptr::null_mut()), false);
+        start_wait_timer(app_state.host_window.0);
     }
 }
 
@@ -197,6 +217,8 @@ fn handle_run_disabled(app_state: &AppState) {
 
     // Update presence indicator
     reflect_target_presence(HWND(std::ptr::null_mut()), find_existing_target().is_some());
+    push_ui_event(EventSeverity::Info, "Start disabled");
+    start_wait_timer(app_state.host_window.0); // continue waiting in case user re-enables soon
 }
 
 /// Update target from the current GUI selector input.
@@ -238,6 +260,38 @@ fn update_target_from_gui(app_state: &AppState, hook_callback: Option<HookCallba
 fn apply_window_mapping(app_state: &AppState, rect: RECT) {
     let config = app_state.get_mapping_config();
     let ctx = rect_to_logcontext(app_state.base_context, rect, &config);
+    // Rect-change guard (GUI emission only):
+    // Some WinEvents (notably EVENT_OBJECT_LOCATIONCHANGE) can fire repeatedly on right-click
+    // or non-client interactions even when the window geometry is unchanged. Previously each
+    // of those events resulted in a visible pair of lines in the GUI event feed (context reopen
+    // + mapping applied) creating noise without conveying new information. We deliberately do
+    // NOT change functional behavior (the mapping / reopen path still executes exactly as before)
+    // but we suppress redundant user-facing "Mapping applied" lines when the (left,top,right,bottom)
+    // rectangle and aspect mode are identical to the last emitted mapping. This keeps the feed
+    // high-signal while preserving identical runtime semantics.
+    // Cached last emitted rectangle + aspect flag to suppress duplicate GUI lines.
+    type LastEmittedRect = (i32, i32, i32, i32, bool);
+    static LAST_EMITTED: OnceCell<Mutex<Option<LastEmittedRect>>> = OnceCell::new();
+    let aspect_flag = config.keep_aspect;
+    let should_emit = {
+        let cell = LAST_EMITTED.get_or_init(|| Mutex::new(None));
+        let mut guard = cell.lock().unwrap();
+        match *guard {
+            Some((l, t, r, b, a))
+                if l == rect.left
+                    && t == rect.top
+                    && r == rect.right
+                    && b == rect.bottom
+                    && a == aspect_flag =>
+            {
+                false
+            }
+            _ => {
+                *guard = Some((rect.left, rect.top, rect.right, rect.bottom, aspect_flag));
+                true
+            }
+        }
+    };
 
     if config.keep_aspect {
         if reopen_with_template(
@@ -253,14 +307,25 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
                 bottom = rect.bottom,
                 "mapping applied via reopen_with_template(aspect)"
             );
+            if should_emit {
+                push_ui_event(
+                    EventSeverity::Info,
+                    format!(
+                        "Mapping applied (aspect) {}/{}/{}/{}",
+                        rect.left, rect.top, rect.right, rect.bottom
+                    ),
+                );
+            }
         } else {
             error!("reopen_with_template failed; aspect mapping skipped");
             set_tray_error();
+            push_ui_event(EventSeverity::Error, "Aspect mapping failed");
         }
     } else if let Ok(h) = app_state.wintab_context.lock() {
         if let Err(e) = apply_mapping(*h, &ctx) {
             error!(?e, "apply_mapping failed");
             set_tray_error();
+            push_ui_event(EventSeverity::Error, "Mapping apply failed");
         } else {
             info!(
                 left = rect.left,
@@ -269,6 +334,15 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
                 bottom = rect.bottom,
                 "mapping applied"
             );
+            if should_emit {
+                push_ui_event(
+                    EventSeverity::Info,
+                    format!(
+                        "Mapping applied {}/{}/{}/{}",
+                        rect.left, rect.top, rect.right, rect.bottom
+                    ),
+                );
+            }
         }
     }
 }

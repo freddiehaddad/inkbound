@@ -9,6 +9,7 @@
 //! Exposed functions are thread‑safe where necessary; the actual HCTX is stored behind a
 //! `Mutex` provided by the caller and only manipulated on the originating thread.
 
+use crate::events::{EventSeverity, push_ui_event};
 use anyhow::{Result, anyhow};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info};
@@ -64,6 +65,10 @@ pub fn open_context_with_fallback(hwnd: HWND) -> Result<(HCTX, LOGCONTEXTA, u32)
         match wt_open(hwnd, &ctx_attempt) {
             Ok(h) => {
                 info!(options = format!("0x{opts:08X}"), "WTOpen succeeded");
+                push_ui_event(
+                    EventSeverity::Info,
+                    format!("WinTab context opened options=0x{opts:08X}"),
+                );
                 picked = Some((h, ctx_attempt, opts));
                 true
             }
@@ -77,6 +82,12 @@ pub fn open_context_with_fallback(hwnd: HWND) -> Result<(HCTX, LOGCONTEXTA, u32)
             }
         }
     });
+    if picked.is_none() {
+        push_ui_event(
+            EventSeverity::Error,
+            "WinTab context open failed for all option combinations",
+        );
+    }
     picked.ok_or_else(|| anyhow!("WTOpenA failed for all option combinations"))
 }
 
@@ -102,6 +113,10 @@ pub fn reopen_context(
                 Ok(hnew) => {
                     *guard = hnew;
                     info!(options = format!("0x{opts:08X}"), "reopen WTOpen succeeded");
+                    push_ui_event(
+                        EventSeverity::Info,
+                        format!("Context reopened options=0x{opts:08X}"),
+                    );
                     return true;
                 }
                 Err(e) => {
@@ -114,9 +129,11 @@ pub fn reopen_context(
             }
         }
         error!("all reopen attempts failed; mapping update skipped");
+        push_ui_event(EventSeverity::Error, "Context reopen failed (all options)");
         false
     } else {
         error!("failed to lock context mutex for reopen");
+        push_ui_event(EventSeverity::Error, "Context reopen mutex lock failed");
         false
     }
 }
@@ -157,9 +174,14 @@ pub fn reopen_with_template(
             }
         }
         error!("all reopen(template) attempts failed");
+        push_ui_event(EventSeverity::Error, "Context reopen(template) failed");
         false
     } else {
         error!("failed to lock context mutex for reopen_with_template");
+        push_ui_event(
+            EventSeverity::Error,
+            "Context reopen(template) mutex lock failed",
+        );
         false
     }
 }

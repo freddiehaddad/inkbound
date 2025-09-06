@@ -192,22 +192,27 @@ pub fn install_hooks(filter: HookFilter, cb: Arc<WinEventCallback>) -> Result<()
         EVENT_SYSTEM_MINIMIZEEND,
     ];
     unsafe {
-        HOOKS.set(Mutex::new(Vec::new())).ok();
         let mut any_fail = false;
-        for &ev in &events {
-            let h = SetWinEventHook(ev, ev, None, Some(win_event_proc), 0, 0, 0);
-            if h.0.is_null() {
-                any_fail = true;
-                debug!(event = ev, "failed to install hook");
-            } else {
-                debug!(event = ev, ?h, "hook installed");
-                if let Some(list) = HOOKS.get() {
-                    list.lock().unwrap().push(HookHandle(h));
+        let collected: Vec<HookHandle> = events
+            .iter()
+            .filter_map(|&ev| {
+                let h = SetWinEventHook(ev, ev, None, Some(win_event_proc), 0, 0, 0);
+                if h.0.is_null() {
+                    any_fail = true;
+                    debug!(event = ev, "failed to install hook");
+                    None
+                } else {
+                    debug!(event = ev, ?h, "hook installed");
+                    Some(HookHandle(h))
                 }
-            }
+            })
+            .collect();
+        HOOKS.set(Mutex::new(Vec::new())).ok();
+        if let Some(list) = HOOKS.get() {
+            list.lock().unwrap().extend(collected);
         }
         if any_fail {
-            // We proceed even if some hooks failed; caller can decide whether partial coverage is acceptable.
+            // Partial installation accepted; caller can decide how to react.
         }
     }
     Ok(())

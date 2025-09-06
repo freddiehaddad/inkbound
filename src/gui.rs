@@ -107,6 +107,17 @@ static GUI_STATE: OnceCell<GuiState> = OnceCell::new();
 fn get_gui_state() -> &'static GuiState {
     GUI_STATE.get_or_init(GuiState::new)
 }
+
+/// Helper: load an HWND from an AtomicIsize (0 => None)
+#[inline]
+fn load_hwnd(atom: &AtomicIsize) -> Option<HWND> {
+    let raw = atom.load(Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        Some(HWND(raw as *mut _))
+    }
+}
 const ID_START_STOP: usize = 2001;
 const ID_CB_KEEP_ASPECT: usize = 2101;
 const ID_RADIO_PROCESS: usize = 2201;
@@ -161,10 +172,10 @@ unsafe fn create_color_icon(r: u8, g: u8, b: u8) -> Option<HICON> {
     // Fill with solid color (premultiplied not required if alpha=255).
     let px = bits as *mut u32;
     let color = (0xFFu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-    for i in 0..(16 * 16) {
-        unsafe {
-            *px.add(i) = color;
-        }
+    // Fill pixel buffer via slice instead of per‑index pointer arithmetic.
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(px, 16 * 16);
+        slice.fill(color);
     }
     // Create a simple 1bpp mask (all zeros -> use alpha channel for shape).
     let hbm_mask = unsafe { CreateBitmap(16, 16, 1, 1, None) };
@@ -274,11 +285,13 @@ unsafe fn recreate_font_for_dpi(dpi: u32) {
         lf.lfHeight = -((pt * dpi as i32 + 36) / 72);
         lf.lfWeight = FW_NORMAL.0 as i32;
         let face = U16CString::from_str("Segoe UI").unwrap();
-        for (i, c) in face.as_slice_with_nul().iter().enumerate() {
-            if i >= lf.lfFaceName.len() {
-                break;
-            }
-            lf.lfFaceName[i] = *c;
+        // Copy face name (truncating automatically) using zip for clarity.
+        for (dst, src) in lf
+            .lfFaceName
+            .iter_mut()
+            .zip(face.as_slice_with_nul().iter())
+        {
+            *dst = *src;
         }
         let f = CreateFontIndirectW(&lf);
         if !f.0.is_null() {
@@ -447,10 +460,9 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     nid.hIcon = hicon;
     let tip = U16CString::from_str("InkBound Mapper").unwrap();
     let slice = tip.as_slice_with_nul();
-    for (i, &c) in slice.iter().enumerate() {
-        if i < nid.szTip.len() {
-            nid.szTip[i] = c;
-        }
+    // Copy tooltip text (truncated if longer than buffer)
+    for (dst, &src) in nid.szTip.iter_mut().zip(slice.iter()) {
+        *dst = src;
     }
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
@@ -546,18 +558,18 @@ unsafe extern "system" fn main_wnd_proc(
             recreate_font_for_dpi(new_dpi);
             // Reapply font to all controls
             let gs = get_gui_state();
-            for h in [
-                gs.selector_label.load(Ordering::Relaxed),
-                gs.selector_edit.load(Ordering::Relaxed),
-                gs.radio_process.load(Ordering::Relaxed),
-                gs.radio_class.load(Ordering::Relaxed),
-                gs.radio_title.load(Ordering::Relaxed),
-                gs.cb_keep_aspect.load(Ordering::Relaxed),
-                gs.start_stop_button.load(Ordering::Relaxed),
-                gs.events_edit.load(Ordering::Relaxed),
+            for atom in [
+                &gs.selector_label,
+                &gs.selector_edit,
+                &gs.radio_process,
+                &gs.radio_class,
+                &gs.radio_title,
+                &gs.cb_keep_aspect,
+                &gs.start_stop_button,
+                &gs.events_edit,
             ] {
-                if h != 0 {
-                    apply_font(HWND(h as *mut _));
+                if let Some(h) = load_hwnd(atom) {
+                    apply_font(h);
                 }
             }
             layout_controls(hwnd, new_dpi);
@@ -877,11 +889,9 @@ pub fn add_events_panel(parent: HWND) -> Result<()> {
 
 /// Append a formatted event line to the events panel (if present). Auto-scrolls to end.
 pub fn append_event_line(ev: &UiEvent) {
-    let h = get_gui_state().events_edit.load(Ordering::Relaxed);
-    if h == 0 {
+    let Some(hwnd) = load_hwnd(&get_gui_state().events_edit) else {
         return;
-    }
-    let hwnd = HWND(h as *mut _);
+    };
     let line = format!("{}\r\n", format_event_line(ev));
     // Select end
     unsafe {
@@ -1116,17 +1126,15 @@ pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> 
             );
         }
 
-        // Store handles
+        // Store handles (compressed to a small loop for clarity)
         let gui_state = get_gui_state();
-        gui_state
-            .radio_process
-            .store(radio_process.0 as isize, Ordering::Relaxed);
-        gui_state
-            .radio_class
-            .store(radio_class.0 as isize, Ordering::Relaxed);
-        gui_state
-            .radio_title
-            .store(radio_title.0 as isize, Ordering::Relaxed);
+        for (cell, hwnd) in [
+            (&gui_state.radio_process, radio_process),
+            (&gui_state.radio_class, radio_class),
+            (&gui_state.radio_title, radio_title),
+        ] {
+            cell.store(hwnd.0 as isize, Ordering::Relaxed);
+        }
 
         // Select the appropriate radio button
         const BM_SETCHECK: u32 = 0x00F1;

@@ -18,8 +18,14 @@ cargo build --release
 # Run with GUI only (choose target later)
 ./target/release/inkbound.exe
 
-# Or immediately map to Photoshop keeping aspect
-./target/release/inkbound.exe --process photoshop.exe --preserve-aspect
+# Immediately map to Photoshop (process match; letterbox is default)
+./target/release/inkbound.exe photoshop.exe
+
+# Match a window title substring (stretch mapping)
+./target/release/inkbound.exe Blender --by title --aspect stretch
+
+# Debug logging
+./target/release/inkbound.exe krita.exe --log debug
 ```
 
 ## Why Another Mapper?
@@ -36,15 +42,17 @@ updates for immediate remapping.
 ## Features
 
 * Zero polling: WinEvent hooks (move, size, foreground, minimize, destroy, create, show).
-* Target selection by process, window class, or title substring (CLI or GUI textbox).
+* Target selection by process, window class, or title substring (positional TARGET + --by, or GUI textbox + radios).
 * Launch with **no arguments** → type selector → press Start.
 * Change selector: edit text, Stop → Start to apply (live update roadmap item).
-* Aspect ratio preservation (crops INPUT extents; always fills window pixels—no letterbox gaps).
+* Two aspect modes:
+  * letterbox (default): preserve target window aspect by cropping tablet input region.
+  * stretch: fill target window (may distort if aspect differs).
 * Automatic context reopen on foreground to mitigate driver resets.
 * Tray icon (Green = active+present, Yellow = waiting/stopped; Red only on explicit error).
-* Single small GUI: radios (selector type), editable textbox, Keep Aspect checkbox, Start/Stop.
+* Single small GUI: selector type radios, editable textbox, aspect radios (Letterbox / Stretch), Start/Stop.
 * Clean shutdown via window close, tray Exit, or Ctrl+C.
-* Verbose logging (`-v` debug, `-vv` trace) & quiet mode (`-q`).
+* Unified logging flag: `--log error|warn|info|debug|trace` (default info).
 * Tested fallback for finicky driver option bit combinations.
 
 ## Requirements
@@ -98,25 +106,25 @@ inkbound.exe --help
 
 ## Usage Overview
 
-You may specify a selector up front OR launch idle and choose in the GUI.
+General form (all flags optional):
 
 ```text
-inkbound --process photoshop.exe [options]
-inkbound --win-class Chrome_WidgetWin_1 [options]
-inkbound --title-contains Blender [options]
-inkbound  # no selector => GUI idle
+inkbound [TARGET] [--by process|class|title] [--aspect letterbox|stretch] [--log error|warn|info|debug|trace]
 ```
 
-### Key Flags
+* Omit `TARGET` to launch GUI idle.
+* Default `--by` is `process` (treat TARGET as an executable name, e.g. `krita.exe`).
+* Default `--aspect` is `letterbox`.
+* Default `--log` is `info`.
 
-| Flag | Meaning |
-|------|---------|
-| `--process <NAME>` | Match process executable (case‑insensitive, include `.exe`). |
-| `--win-class <CLASS>` | Match exact top‑level window class. |
-| `--title-contains <SUBSTR>` | Match if window title contains substring (case‑sensitive). |
-| `--preserve-aspect` | Crop tablet input to preserve window aspect (no distortion). |
-| `-v / -vv` | Increase verbosity (debug / trace). |
-| `-q` | Quiet (warnings + errors only). |
+### Flags
+
+| Arg / Flag | Meaning |
+|------------|---------|
+| `TARGET` | Optional selector string (process name, class name, or title substring). |
+| `--by <kind>` | Interpret TARGET as `process`, `class`, or `title` (substring). |
+| `--aspect <mode>` | `letterbox` (preserve / crop) or `stretch` (fill). |
+| `--log <level>` | Verbosity: `error` `warn` `info` `debug` `trace`. |
 
 ### Examples
 
@@ -124,26 +132,26 @@ inkbound  # no selector => GUI idle
 # Idle GUI, pick later
 inkbound
 
-# Krita with aspect preserved
-inkbound --process krita.exe --preserve-aspect
+# Krita (process match, default letterbox)
+inkbound krita.exe
 
-# Chrome window by class (no aspect crop)
-inkbound --win-class Chrome_WidgetWin_1
+# Chrome window class (stretch mapping)
+inkbound Chrome_WidgetWin_1 --by class --aspect stretch
 
 # Any window with "Blender" in title, trace logs
-inkbound --title-contains Blender -vv
+inkbound Blender --by title --log trace
 
-# Quiet mapping to SAI
-inkbound --process sai.exe -q
+# Photoshop with debug logs
+inkbound photoshop.exe --log debug
 ```
 
 ### GUI Interaction
 
 1. Choose selector type via radio buttons (Process / Class / Title).
 2. Enter selector text (e.g. `photoshop.exe`).
-3. (Optional) Check *Keep tablet aspect* to crop input extents.
+3. Pick aspect mode via radios: Letterbox (preserve) or Stretch (fill).
 4. Press *Start*.
-5. Change target later: edit text → Stop → Start.
+5. Change target later: edit text → Stop → Start (live switching planned).
 
 Tray menu: Right‑click → Restore / Start|Stop / Exit. Double‑click icon to restore.
 
@@ -167,26 +175,20 @@ Recommended driver settings (Wacom Desktop Center / Settings):
 
 ## Logging & Diagnostics
 
-Defaults to INFO. Override:
+Default level: info.
 
 ```powershell
-# Debug
-inkbound --process photoshop.exe -v
+# Debug detail
+inkbound photoshop.exe --log debug
 
-# Trace
-inkbound --process photoshop.exe -vv
+# Full trace (includes event + mapping detail)
+inkbound photoshop.exe --log trace
 
-# Environment filter
-$env:RUST_LOG = "inkbound=debug"; inkbound --process photoshop.exe
+# Override via environment (standard tracing subscriber semantics)
+$env:RUST_LOG = "inkbound=debug"; inkbound photoshop.exe
 
-# Dump applied LOGCONTEXT state each update
-$env:WINTAB_DUMP = "1"; inkbound --process photoshop.exe -v
-```
-
-Capture a trace log:
-
-```powershell
-inkbound --process photoshop.exe -vv 2>&1 | Tee-Object -FilePath inkbound-trace.txt
+# Capture a trace log to file (PowerShell)
+inkbound photoshop.exe --log trace 2>&1 | Tee-Object -FilePath inkbound-trace.txt
 ```
 
 ## Architecture (Short Form)
@@ -194,19 +196,19 @@ inkbound --process photoshop.exe -vv 2>&1 | Tee-Object -FilePath inkbound-trace.
 1. Acquire default LOGCONTEXT via `WTInfoA`.
 2. Open context with optimistic option flags (fallback list if driver rejects).
 3. Install WinEvent hooks (create/show/destroy/location/foreground/minimize transitions).
-4. Each relevant event recomputes geometry; aspect ON => build template & reopen; aspect OFF => apply in place.
+4. Each relevant event recomputes geometry; letterbox => crop & possibly reopen; stretch => direct apply.
 5. Foreground switches trigger a defensive reopen (driver quirk mitigation).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Never turns green | Selector mismatch | Use `-vv`, verify exact process (incl. `.exe`) / class / title. |
+| Never turns green | Selector mismatch | Use `--log trace`, verify exact process (incl. `.exe`) / class / title. |
 | Area shrinks unpredictably | Competing driver foreground mapping | Disable driver auto‑app mapping features. |
-| Distorted / stretched mapping | Aspect not preserved | Enable `--preserve-aspect` / checkbox. |
+| Distorted mapping | Using stretch when preservation desired | Switch aspect to letterbox (GUI radio / `--aspect letterbox`). |
 | Cursor offset | Driver mapped to partial display | Set driver mapping to all displays; restart. |
-| Stops after alt‑tabbing | Driver reset | Reopen heuristic already applied; update driver; file issue with logs. |
-| Changed selector does nothing | Not re‑started | Press Stop then Start to reapply hooks. |
+| Stops after alt‑tabbing | Driver reset | Heuristic reopen already applied; update driver; file issue with trace log. |
+| Changed selector does nothing | Not re‑started | Press Stop then Start (live update planned). |
 
 ## Limitations
 
@@ -222,8 +224,8 @@ PRs and issues welcome. Please include:
 
 * Tablet model & driver version
 * Windows version (build number)
-* Whether aspect mode was on
-* Trace log (`-vv`) and, if geometry related, `WINTAB_DUMP=1`
+* Aspect mode (letterbox or stretch)
+* Trace log (`--log trace`)
 
 ## License
 

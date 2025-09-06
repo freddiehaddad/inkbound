@@ -51,8 +51,9 @@ pub fn register_gui_callbacks(app_state: Arc<AppState>, hook_callback: Option<Ho
     // Register aspect ratio toggle callback
     {
         let app_state_for_aspect_toggle = app_state;
-        set_aspect_toggle_callback(Arc::new(move |enabled| {
-            handle_aspect_toggle(app_state_for_aspect_toggle.clone(), enabled);
+        use crate::cli::AspectMode;
+        set_aspect_toggle_callback(Arc::new(move |mode: AspectMode| {
+            handle_aspect_toggle(app_state_for_aspect_toggle.clone(), mode);
         }));
     }
 }

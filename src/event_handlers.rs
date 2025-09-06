@@ -3,6 +3,7 @@
 //! This module extracts the complex callback logic from main.rs into
 //! well-structured, testable functions.
 
+use crate::cli::AspectMode;
 use crate::events::{EventSeverity, push_ui_event};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
@@ -101,12 +102,17 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
     // Apply the mapping
     apply_window_mapping(&app_state, rect);
 
-    // Update UI to show target is present
+    // Determine if this is a first appearance (previously not present)
+    let first_appearance = !is_target_present();
     reflect_target_presence(HWND(std::ptr::null_mut()), true);
     stop_wait_timer();
-    if !is_target_present() {
-        // if previously absent
+    if first_appearance {
         push_ui_event(EventSeverity::Info, "Target appeared");
+        // Force a re-map using current aspect mode to ensure consistency even if
+        // the initial window event sequence didn't trigger an aspect-aware path.
+        if is_run_enabled() {
+            apply_window_mapping(&app_state, rect);
+        }
     }
 
     // Optional debug dump
@@ -131,30 +137,44 @@ pub fn handle_run_toggle(
 /// Handle aspect ratio toggle from GUI.
 ///
 /// When the mapping is currently active we immediately re‑apply with the new aspect setting.
-pub fn handle_aspect_toggle(app_state: Arc<AppState>, enabled: bool) {
+pub fn handle_aspect_toggle(app_state: Arc<AppState>, mode: AspectMode) {
+    let enabled = matches!(mode, AspectMode::Letterbox);
     app_state.set_preserve_aspect(enabled);
+    let mode_str = match mode {
+        AspectMode::Letterbox => "letterbox",
+        AspectMode::Stretch => "stretch",
+    };
 
     if !is_run_enabled() {
         return;
     }
 
     // Reapply mapping with new aspect setting if target present
-    if let Some(hwnd_cur) = find_existing_target()
-        && let Some(rect) = query_window_rect(hwnd_cur)
-    {
-        apply_window_mapping(&app_state, rect);
-        info!(
-            keep_aspect = enabled,
-            left = rect.left,
-            top = rect.top,
-            right = rect.right,
-            bottom = rect.bottom,
-            "aspect toggle re-mapped"
-        );
-        reflect_target_presence(HWND(std::ptr::null_mut()), true);
+    if let Some(hwnd_cur) = find_existing_target() {
+        if let Some(rect) = query_window_rect(hwnd_cur) {
+            apply_window_mapping(&app_state, rect);
+            info!(
+                aspect_mode = mode_str,
+                left = rect.left,
+                top = rect.top,
+                right = rect.right,
+                bottom = rect.bottom,
+                "aspect toggle re-mapped"
+            );
+            reflect_target_presence(HWND(std::ptr::null_mut()), true);
+            push_ui_event(EventSeverity::Info, format!("Aspect: {mode_str}"));
+        } else {
+            info!(aspect_mode = mode_str, "aspect changed (no rect yet)");
+            push_ui_event(
+                EventSeverity::Info,
+                format!("Aspect: {mode_str} (pending target)"),
+            );
+        }
+    } else {
+        info!(aspect_mode = mode_str, "aspect changed (no target yet)");
         push_ui_event(
             EventSeverity::Info,
-            format!("Aspect mode {}", if enabled { "ON" } else { "OFF" }),
+            format!("Aspect: {mode_str} (no target)"),
         );
     }
 }
@@ -350,17 +370,13 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
     }
 }
 
-/// Debug dump context state if `WINTAB_DUMP=1`.
-///
-/// Intended for troubleshooting geometry or driver behaviour; kept cheap by only executing
-/// when the environment variable is explicitly set.
+/// Emit detailed context geometry at trace level (lightweight guard around lock/Ffi call).
 fn dump_context_state_if_requested(app_state: &AppState) {
-    let dump = matches!(std::env::var("WINTAB_DUMP"), Ok(ref v) if v == "1");
-    if dump
+    if tracing::level_enabled!(tracing::Level::TRACE)
         && let Ok(h) = app_state.wintab_context.lock()
         && let Ok(cur) = wt_get(*h)
     {
-        info!(
+        tracing::trace!(
             out_org_x = cur.lcOutOrgX,
             out_org_y = cur.lcOutOrgY,
             out_ext_x = cur.lcOutExtX,
@@ -373,7 +389,7 @@ fn dump_context_state_if_requested(app_state: &AppState) {
             in_org_y = cur.lcInOrgY,
             in_ext_x = cur.lcInExtX,
             in_ext_y = cur.lcInExtY,
-            "post-apply context state"
+            "context state"
         );
     }
 }

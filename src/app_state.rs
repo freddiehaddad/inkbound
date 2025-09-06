@@ -76,7 +76,7 @@ impl AppState {
 
     /// Update aspect ratio setting.
     ///
-    /// This is atomic so GUI checkbox toggles can mutate the flag without contending
+    /// This is atomic so GUI aspect radio toggles can mutate the flag without contending
     /// on any other shared mutex.
     pub fn set_preserve_aspect(&self, enabled: bool) {
         self.preserve_aspect.store(enabled, Ordering::Relaxed);

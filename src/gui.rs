@@ -39,7 +39,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_COMMAND, WM_DESTROY, WM_PAINT, WM_SIZE, WNDCLASSW, WS_CHILD, WS_EX_CLIENTEDGE,
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VSCROLL,
 };
-use windows::Win32::UI::WindowsAndMessaging::{BM_SETCHECK, BS_AUTOCHECKBOX, SendMessageW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    BM_SETCHECK, BS_AUTORADIOBUTTON, SendMessageW, WS_GROUP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 use windows::core::PCWSTR;
 // removed SetWindowTheme usage; w! macro no longer needed
@@ -81,12 +83,13 @@ pub struct GuiState {
     /// Optional callback invoked whenever the user toggles Start/Stop
     run_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
     /// Callback for aspect ratio toggle
-    aspect_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
+    aspect_toggle_cb: OnceCell<Arc<dyn Fn(AspectMode) + Send + Sync>>,
     /// Handle to the events feed edit control
     events_edit: AtomicIsize,
     wait_timer_active: AtomicBool,
     selector_label: AtomicIsize,
-    cb_keep_aspect: AtomicIsize,
+    radio_letterbox: AtomicIsize, // letterbox radio
+    radio_stretch: AtomicIsize,   // stretch radio
     /// RAII guard ensuring the tray icon is removed if initialization succeeded and code paths
     /// forget to explicitly delete it (e.g. early panic or future refactors). The guard lives
     /// for the program lifetime; explicit removal on user exit remains for immediate UX.
@@ -111,7 +114,8 @@ impl GuiState {
             events_edit: AtomicIsize::new(0),
             wait_timer_active: AtomicBool::new(false),
             selector_label: AtomicIsize::new(0),
-            cb_keep_aspect: AtomicIsize::new(0),
+            radio_letterbox: AtomicIsize::new(0),
+            radio_stretch: AtomicIsize::new(0),
             tray_icon_guard: OnceCell::new(),
         }
     }
@@ -136,7 +140,8 @@ fn load_hwnd(atom: &AtomicIsize) -> Option<HWND> {
     }
 }
 const ID_START_STOP: usize = 2001;
-const ID_CB_KEEP_ASPECT: usize = 2101;
+const ID_RADIO_ASPECT_LETTERBOX: usize = 2101; // letterbox aspect radio id
+const ID_RADIO_ASPECT_STRETCH: usize = 2102; // stretch radio id
 const ID_RADIO_PROCESS: usize = 2201;
 const ID_RADIO_CLASS: usize = 2202;
 const ID_RADIO_TITLE: usize = 2203;
@@ -279,7 +284,7 @@ const BASE_MARGIN: i32 = 16;
 const BASE_EDIT_HEIGHT: i32 = 24; // unify edit height with other controls for consistent vertical rhythm
 // Removed absolute Y position constants; rows flow sequentially.
 const BASE_BUTTON_HEIGHT: i32 = 32; // start/stop button height
-const BASE_CONTROL_H: i32 = 24; // radio / checkbox / label nominal height
+const BASE_CONTROL_H: i32 = 24; // radio / label nominal height
 const BASE_V_GAP: i32 = 12; // uniform vertical gap between rows
 const BASE_RADIO_GAP: i32 = 16; // uniform horizontal gap between radios (text edge to next control)
 const BASE_WINDOW_W: i32 = 600;
@@ -412,12 +417,30 @@ fn layout_controls(hwnd: HWND, dpi: u32) {
         }
         y += ctrl_h + gap;
 
-        // Row 3: checkbox
-        let cb = gs.cb_keep_aspect.load(Ordering::Relaxed);
-        if cb != 0 {
-            let _ = MoveWindow(HWND(cb as *mut _), margin, y, total_width, ctrl_h, true);
+        // Row 3: aspect radios (Letterbox / Stretch)
+        let aspect_radios = [
+            gs.radio_letterbox.load(Ordering::Relaxed),
+            gs.radio_stretch.load(Ordering::Relaxed),
+        ];
+        if aspect_radios.iter().any(|h| *h != 0) {
+            let mut x2 = margin;
+            let gap_aspect = gap_x; // reuse radio gap spacing
+            for h in aspect_radios {
+                if h == 0 {
+                    continue;
+                }
+                let wh = HWND(h as *mut _);
+                let len = GetWindowTextLengthW(wh);
+                let logical = (len * 7 + 28).max(60); // a bit wider for readability
+                let w_px = scale(logical, dpi);
+                if x2 + w_px > margin + total_width {
+                    break;
+                }
+                let _ = MoveWindow(wh, x2, y, w_px, ctrl_h, true);
+                x2 += w_px + gap_aspect;
+            }
+            y += ctrl_h + gap;
         }
-        y += ctrl_h + gap;
 
         // Row 4: start/stop button
         let b = gs.start_stop_button.load(Ordering::Relaxed);
@@ -601,7 +624,8 @@ unsafe extern "system" fn main_wnd_proc(
                 &gs.radio_process,
                 &gs.radio_class,
                 &gs.radio_title,
-                &gs.cb_keep_aspect,
+                &gs.radio_letterbox,
+                &gs.radio_stretch,
                 &gs.start_stop_button,
                 &gs.events_edit,
             ] {
@@ -623,7 +647,8 @@ unsafe extern "system" fn main_wnd_proc(
                     gs.radio_process.load(Ordering::Relaxed),
                     gs.radio_class.load(Ordering::Relaxed),
                     gs.radio_title.load(Ordering::Relaxed),
-                    gs.cb_keep_aspect.load(Ordering::Relaxed),
+                    gs.radio_letterbox.load(Ordering::Relaxed),
+                    gs.radio_stretch.load(Ordering::Relaxed),
                 ];
                 if targets.contains(&ctrl) {
                     let hdc = HDC(wparam.0 as *mut _);
@@ -674,18 +699,46 @@ unsafe extern "system" fn main_wnd_proc(
                     perform_run_toggle();
                     LRESULT(0)
                 }
-                ID_CB_KEEP_ASPECT => {
-                    // Query checkbox state (BM_GETCHECK = 0x00F0). Returns BST_CHECKED (1) when checked.
-                    const BM_GETCHECK: u32 = 0x00F0;
-                    let state = SendMessageW(
-                        HWND(lparam.0 as *mut _),
-                        BM_GETCHECK,
-                        Some(WPARAM(0)),
-                        Some(LPARAM(0)),
-                    );
-                    let checked = state.0 == 1; // BST_CHECKED
+                ID_RADIO_ASPECT_LETTERBOX | ID_RADIO_ASPECT_STRETCH => {
+                    // Determine selected aspect mode directly from control ID.
+                    let mode = if (wparam.0 & 0xFFFF) == ID_RADIO_ASPECT_LETTERBOX {
+                        AspectMode::Letterbox
+                    } else {
+                        AspectMode::Stretch
+                    };
+                    // Manually enforce mutual exclusivity (style already radios, but we ensure state).
+                    const BM_SETCHECK: u32 = 0x00F1;
+                    const BST_CHECKED: usize = 1;
+                    let gs = get_gui_state();
+                    let (this_handle, other_handle) = if matches!(mode, AspectMode::Letterbox) {
+                        (
+                            gs.radio_letterbox.load(Ordering::Relaxed),
+                            gs.radio_stretch.load(Ordering::Relaxed),
+                        )
+                    } else {
+                        (
+                            gs.radio_stretch.load(Ordering::Relaxed),
+                            gs.radio_letterbox.load(Ordering::Relaxed),
+                        )
+                    };
+                    if this_handle != 0 {
+                        let _ = SendMessageW(
+                            HWND(this_handle as *mut _),
+                            BM_SETCHECK,
+                            Some(WPARAM(BST_CHECKED)),
+                            Some(LPARAM(0)),
+                        );
+                    }
+                    if other_handle != 0 {
+                        let _ = SendMessageW(
+                            HWND(other_handle as *mut _),
+                            BM_SETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        );
+                    }
                     if let Some(cb) = get_gui_state().aspect_toggle_cb.get() {
-                        cb(checked);
+                        cb(mode);
                     }
                     LRESULT(0)
                 }
@@ -812,7 +865,8 @@ fn show_child_controls(hwnd: HWND) {
         gs.radio_process.load(Ordering::Relaxed),
         gs.radio_class.load(Ordering::Relaxed),
         gs.radio_title.load(Ordering::Relaxed),
-        gs.cb_keep_aspect.load(Ordering::Relaxed),
+        gs.radio_letterbox.load(Ordering::Relaxed),
+        gs.radio_stretch.load(Ordering::Relaxed),
         gs.start_stop_button.load(Ordering::Relaxed),
         gs.events_edit.load(Ordering::Relaxed),
     ];
@@ -828,8 +882,8 @@ fn show_child_controls(hwnd: HWND) {
     }
 }
 
-/// Create the full GUI window (selector textbox, radio buttons, option checkboxes, start/stop button) in one call.
-/// High‑level convenience to build the full GUI (text box, radios, checkbox, button) in order.
+/// Create the full GUI window (selector textbox, selector radios, aspect radios, start/stop button) in one call.
+/// High‑level convenience to build the full GUI (text box, selector radios, aspect radios, button) in order.
 pub fn create_main_window(
     title: &str,
     selector_label: &str,
@@ -846,7 +900,7 @@ pub fn create_main_window(
     let hwnd = create_raw_main_window(title)?;
     let _ = add_selector_textbox(hwnd, selector_label, selector_value);
     let _ = add_selector_radio_buttons(hwnd, selector_type);
-    let _ = add_option_checkboxes(hwnd, preserve_aspect);
+    let _ = add_aspect_radios(hwnd, preserve_aspect);
     let _ = add_start_stop_button(hwnd, initial_run_enabled);
     let _ = add_events_panel(hwnd);
     unsafe {
@@ -1191,53 +1245,64 @@ pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> 
     Ok(())
 }
 
-/// Add two read-only state checkboxes reflecting CLI options.
-/// Add option checkboxes (currently only aspect ratio preservation). Hidden-first creation avoids a bold flash.
-pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> {
+/// Add the two aspect mode radios (Letterbox / Stretch). Hidden-first creation avoids flicker.
+pub fn add_aspect_radios(parent: HWND, preserve_aspect: bool) -> Result<()> {
     unsafe {
-        // Helper to create a checkbox
-        let make_cb = |text: &str, y: i32, id: Option<usize>| -> Option<HWND> {
+        let make_radio = |text: &str, id: usize, first: bool| -> Option<HWND> {
             let wstr = U16CString::from_str(text).ok()?;
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 PCWSTR(U16CString::from_str("BUTTON").unwrap().as_ptr()),
                 PCWSTR(wstr.as_ptr()),
-                // Create hidden first; we'll set font then show to avoid initial bold/default font paint
-                WINDOW_STYLE(WS_CHILD.0 | (BS_AUTOCHECKBOX as u32)),
+                WINDOW_STYLE(
+                    WS_CHILD.0 | (if first { WS_GROUP.0 } else { 0 }) | (BS_AUTORADIOBUTTON as u32),
+                ),
                 0,
-                y,
                 0,
-                24, // taller to prevent text clipping
+                0,
+                24,
                 Some(parent),
-                id.map(|v| HMENU(v as *mut _)),
+                Some(HMENU(id as *mut _)),
                 None,
                 None,
             )
             .ok()
         };
-        // BM_SETCHECK expects wParam = BST_* (0/1/2)
         const BST_CHECKED: usize = 1;
-        if let Some(cb1) = make_cb("Keep tablet aspect", 0, Some(ID_CB_KEEP_ASPECT)) {
+        if let Some(letterbox) = make_radio("Letterbox", ID_RADIO_ASPECT_LETTERBOX, true) {
             get_gui_state()
-                .cb_keep_aspect
-                .store(cb1.0 as isize, Ordering::Relaxed);
+                .radio_letterbox
+                .store(letterbox.0 as isize, Ordering::Relaxed);
             if preserve_aspect {
-                let _ = SendMessageW(cb1, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), Some(LPARAM(0)));
+                let _ = SendMessageW(
+                    letterbox,
+                    BM_SETCHECK,
+                    Some(WPARAM(BST_CHECKED)),
+                    Some(LPARAM(0)),
+                );
             }
-            let _ = SetWindowTheme(
-                cb1,
-                PCWSTR(U16CString::from_str("Explorer").unwrap().as_ptr()),
-                PCWSTR(std::ptr::null()),
-            );
         }
-        // (Second checkbox for removed feature intentionally omitted.)
+        if let Some(stretch) = make_radio("Stretch", ID_RADIO_ASPECT_STRETCH, false) {
+            get_gui_state()
+                .radio_stretch
+                .store(stretch.0 as isize, Ordering::Relaxed);
+            if !preserve_aspect {
+                let _ = SendMessageW(
+                    stretch,
+                    BM_SETCHECK,
+                    Some(WPARAM(BST_CHECKED)),
+                    Some(LPARAM(0)),
+                );
+            }
+        }
     }
     Ok(())
 }
 
-/// Register callback invoked when aspect checkbox toggled.
-/// Register the aspect ratio toggle callback. Ignored if already set.
-pub fn set_aspect_toggle_callback(cb: Arc<dyn Fn(bool) + Send + Sync>) {
+/// Register the aspect mode change callback. Ignored if already set.
+use crate::cli::AspectMode;
+
+pub fn set_aspect_toggle_callback(cb: Arc<dyn Fn(AspectMode) + Send + Sync>) {
     let _ = get_gui_state().aspect_toggle_cb.set(cb);
 }
 

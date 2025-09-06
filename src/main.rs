@@ -16,8 +16,8 @@
 //! 6. On destroy / minimize we temporarily reset to the original full‑tablet mapping.
 //! 7. Run the Win32 message loop until Ctrl+C (which posts WM_QUIT) or external termination.
 //!
-//! Logging surfaces hook installation, mapping application, fallback behaviour, and context
-//! state (optionally via WINTAB_DUMP=1).
+//! Logging surfaces hook installation, mapping application, fallback behaviour,
+//! and detailed context state at trace level.
 
 mod app_state; // Shared mutable runtime state (WinTab handle, target, aspect flag)
 mod callbacks; // GUI & WinEvent callback registration helpers
@@ -38,7 +38,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use app_state::AppState;
-use cli::{Cli, cli_to_selector_config};
+use cli::{AspectMode, Cli, cli_to_selector_config};
 use context::open_context_with_fallback;
 use events::{EventSeverity, push_ui_event, set_event_sink};
 use gui::{append_event_line, create_main_window, run_message_loop};
@@ -59,8 +59,8 @@ use wintab::wt_close;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Configure logging according to CLI flags
-    configure_logging(cli.quiet, cli.verbose);
+    // Configure logging according to new unified log level
+    configure_logging(cli.log);
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -69,7 +69,7 @@ fn main() -> Result<()> {
     );
 
     // Convert CLI arguments to selector configuration
-    let selector_config = cli_to_selector_config(&cli.process, &cli.win_class, &cli.title_contains);
+    let selector_config = cli_to_selector_config(&cli);
 
     // Try to create the GUI window first, which will serve as our WinTab host
     let window_title = format!("InkBound Mapper v{}", env!("CARGO_PKG_VERSION"));
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
         &window_title,
         "Target",
         &selector_config.selector_value,
-        cli.preserve_aspect,
+        matches!(cli.aspect, AspectMode::Letterbox),
         selector_config.selector_type,
         initial_run_enabled,
     )?;
@@ -102,7 +102,7 @@ fn main() -> Result<()> {
         final_options,
         hwnd,
         selector_config.target.clone(),
-        cli.preserve_aspect,
+        matches!(cli.aspect, AspectMode::Letterbox),
     ));
 
     // Ctrl+C handler -> graceful quit (must post WM_QUIT to ORIGINAL thread, PostQuitMessage on handler thread is ineffective)
@@ -124,7 +124,7 @@ fn main() -> Result<()> {
 
     // Keep these for backward compatibility with existing callbacks during transition
     let cfg_initial = MapConfig {
-        keep_aspect: cli.preserve_aspect,
+        keep_aspect: matches!(cli.aspect, AspectMode::Letterbox),
     };
     let base_ctx_for_cb = base_ctx; // template for mapping
 

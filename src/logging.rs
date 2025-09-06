@@ -3,6 +3,7 @@
 //! This module handles tracing subscriber setup based on CLI verbosity flags
 //! and environment variables.
 
+use crate::cli::LogLevel;
 use tracing::Level;
 
 /// Configure the tracing subscriber according to CLI verbosity flags.
@@ -12,21 +13,19 @@ use tracing::Level;
 /// 2. `-vv` => TRACE.
 /// 3. `-v`  => DEBUG.
 /// 4. Else INFO with optional `RUST_LOG` env filter overrides.
-pub fn configure_logging(quiet: bool, verbose: u8) {
-    let builder = tracing_subscriber::fmt::Subscriber::builder();
-
-    if quiet {
-        builder.with_max_level(Level::WARN).init();
-    } else if verbose > 1 {
-        builder.with_max_level(Level::TRACE).init();
-    } else if verbose == 1 {
-        builder.with_max_level(Level::DEBUG).init();
-    } else {
-        builder
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_max_level(Level::INFO)
-            .init();
-    }
+pub fn configure_logging(level: LogLevel) {
+    use LogLevel::*;
+    let max = match level {
+        Error => Level::ERROR,
+        Warn => Level::WARN,
+        Info => Level::INFO,
+        Debug => Level::DEBUG,
+        Trace => Level::TRACE,
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_max_level(max)
+        .init();
 }
 
 #[cfg(test)]

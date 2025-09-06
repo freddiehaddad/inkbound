@@ -122,7 +122,11 @@ pub fn reopen_context(
                 return Ok(());
             }
             Err(e) => {
-                error!(options = format!("0x{opts:08X}"), ?e, "reopen WTOpen failed");
+                error!(
+                    options = format!("0x{opts:08X}"),
+                    ?e,
+                    "reopen WTOpen failed"
+                );
             }
         }
     }
@@ -153,11 +157,18 @@ pub fn reopen_with_template(
         match wt_open(hwnd.0, &ctx_attempt) {
             Ok(hnew) => {
                 *guard = hnew;
-                info!(options = format!("0x{opts:08X}"), "reopen(template) succeeded");
+                info!(
+                    options = format!("0x{opts:08X}"),
+                    "reopen(template) succeeded"
+                );
                 return Ok(());
             }
             Err(e) => {
-                error!(options = format!("0x{opts:08X}"), ?e, "reopen(template) failed");
+                error!(
+                    options = format!("0x{opts:08X}"),
+                    ?e,
+                    "reopen(template) failed"
+                );
             }
         }
     }

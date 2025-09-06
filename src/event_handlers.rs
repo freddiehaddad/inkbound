@@ -67,12 +67,13 @@ pub fn handle_window_event(app_state: Arc<AppState>, hwnd: HWND, event: u32, mut
 
     // Handle foreground events (reopen context to work around driver issues)
     if event == EVENT_SYSTEM_FOREGROUND
-        && !reopen_context(
+        && reopen_context(
             &app_state.wintab_context,
             app_state.host_window,
             app_state.base_context,
             app_state.final_options,
         )
+        .is_err()
     {
         set_tray_error();
         push_ui_event(EventSeverity::Error, "Context reopen failed (foreground)");
@@ -299,7 +300,9 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
             app_state.host_window,
             ctx,
             app_state.final_options,
-        ) {
+        )
+        .is_ok()
+        {
             info!(
                 left = rect.left,
                 top = rect.top,
@@ -352,7 +355,8 @@ fn apply_window_mapping(app_state: &AppState, rect: RECT) {
 /// Intended for troubleshooting geometry or driver behaviour; kept cheap by only executing
 /// when the environment variable is explicitly set.
 fn dump_context_state_if_requested(app_state: &AppState) {
-    if std::env::var("WINTAB_DUMP").as_deref() == Ok("1")
+    let dump = matches!(std::env::var("WINTAB_DUMP"), Ok(ref v) if v == "1");
+    if dump
         && let Ok(h) = app_state.wintab_context.lock()
         && let Ok(cur) = wt_get(*h)
     {

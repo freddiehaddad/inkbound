@@ -63,8 +63,20 @@ pub struct GuiState {
     radio_class: AtomicIsize,
     radio_title: AtomicIsize,
     /// User-controlled Start/Stop state (true = mapping active/desirable)
+    ///
+    /// Atomic ordering rationale:
+    /// These atomic flags (`run_enabled`, `target_present`, plus handle fields) are read from
+    /// auxiliary threads for quick status checks (e.g. event / hook callbacks) while all writes
+    /// occur on the GUI thread. There is no cross-field invariant that depends on relative
+    /// ordering of writes, and readers only need the most recently observed value – not a
+    /// consistent snapshot across multiple fields. Therefore `Ordering::Relaxed` is sufficient
+    /// everywhere they are accessed. If in the future a reader observes one flag and then makes
+    /// decisions contingent on another flag's freshly written value, we can upgrade the write
+    /// to `Release` and the read to `Acquire` (or wrap the group in a `Mutex`). For now keeping
+    /// them relaxed avoids superfluous fences on the fast path.
     run_enabled: AtomicBool,
-    /// Whether the target window currently exists (for tray icon coloring)
+    /// Whether the target window currently exists (for tray icon coloring). See ordering note
+    /// above for justification of relaxed loads/stores.
     target_present: AtomicBool,
     /// Optional callback invoked whenever the user toggles Start/Stop
     run_toggle_cb: OnceCell<Arc<dyn Fn(bool) + Send + Sync>>,
@@ -75,6 +87,10 @@ pub struct GuiState {
     wait_timer_active: AtomicBool,
     selector_label: AtomicIsize,
     cb_keep_aspect: AtomicIsize,
+    /// RAII guard ensuring the tray icon is removed if initialization succeeded and code paths
+    /// forget to explicitly delete it (e.g. early panic or future refactors). The guard lives
+    /// for the program lifetime; explicit removal on user exit remains for immediate UX.
+    tray_icon_guard: OnceCell<TrayIconGuard>,
 }
 
 impl GuiState {
@@ -96,6 +112,7 @@ impl GuiState {
             wait_timer_active: AtomicBool::new(false),
             selector_label: AtomicIsize::new(0),
             cb_keep_aspect: AtomicIsize::new(0),
+            tray_icon_guard: OnceCell::new(),
         }
     }
 }
@@ -109,7 +126,7 @@ fn get_gui_state() -> &'static GuiState {
 }
 
 /// Helper: load an HWND from an AtomicIsize (0 => None)
-#[inline]
+#[inline(always)]
 fn load_hwnd(atom: &AtomicIsize) -> Option<HWND> {
     let raw = atom.load(Ordering::Relaxed);
     if raw == 0 {
@@ -467,6 +484,9 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
     }
+    // Install RAII guard once (idempotent if called again for refresh scenarios).
+    let gs = get_gui_state();
+    let _ = gs.tray_icon_guard.set(TrayIconGuard { hwnd });
 }
 
 /// Remove the tray icon (idempotent if not present).
@@ -480,6 +500,23 @@ unsafe fn remove_tray_icon(hwnd: HWND) {
     }
     // Icon resources created for the tray are destroyed individually when updated/removed.
 }
+
+/// RAII guard that removes the tray icon on drop (best-effort / idempotent).
+struct TrayIconGuard {
+    hwnd: HWND,
+}
+
+impl Drop for TrayIconGuard {
+    fn drop(&mut self) {
+        unsafe { remove_tray_icon(self.hwnd) };
+    }
+}
+
+// SAFETY: The guard performs only an idempotent Shell_NotifyIconW deletion in Drop; HWND handle
+// value is copied and not mutated concurrently. Multiple drops (including OS process teardown)
+// are harmless.
+unsafe impl Send for TrayIconGuard {}
+unsafe impl Sync for TrayIconGuard {}
 
 /// Show the context menu for the tray icon at the current cursor location.
 unsafe fn show_tray_menu(hwnd: HWND) {
@@ -624,6 +661,7 @@ unsafe extern "system" fn main_wnd_proc(
                     LRESULT(0)
                 }
                 IDM_TRAY_EXIT => {
+                    // Immediate icon removal for UX (in addition to RAII guarantee at shutdown).
                     remove_tray_icon(hwnd);
                     PostQuitMessage(0);
                     LRESULT(0)
@@ -677,7 +715,6 @@ unsafe extern "system" fn main_wnd_proc(
             stop_wait_timer();
             // Font cleanup no longer required (default fonts in use)
             // no dark brush cleanup needed
-            remove_tray_icon(hwnd);
             PostQuitMessage(0);
             LRESULT(0)
         },

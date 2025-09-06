@@ -105,7 +105,3 @@ impl AppState {
             .unwrap_or(false)
     }
 }
-
-// Implement Send + Sync for cross-thread usage
-unsafe impl Send for AppState {}
-unsafe impl Sync for AppState {}

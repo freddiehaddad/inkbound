@@ -102,40 +102,33 @@ pub fn reopen_context(
     hwnd: SendHwnd,
     base_ctx_template: LOGCONTEXTA,
     final_options: u32,
-) -> bool {
-    if let Ok(mut guard) = hctx_cell.lock() {
-        let old = *guard;
-        wt_close(old);
-        for opts in fallback_options(final_options) {
-            let mut ctx_attempt = base_ctx_template;
-            ctx_attempt.lcOptions = opts;
-            match wt_open(hwnd.0, &ctx_attempt) {
-                Ok(hnew) => {
-                    *guard = hnew;
-                    info!(options = format!("0x{opts:08X}"), "reopen WTOpen succeeded");
-                    push_ui_event(
-                        EventSeverity::Info,
-                        format!("Context reopened options=0x{opts:08X}"),
-                    );
-                    return true;
-                }
-                Err(e) => {
-                    error!(
-                        options = format!("0x{opts:08X}"),
-                        ?e,
-                        "reopen WTOpen failed"
-                    );
-                }
+) -> Result<()> {
+    let mut guard = hctx_cell
+        .lock()
+        .map_err(|_| anyhow!("context mutex poisoned (reopen)"))?;
+    let old = *guard;
+    wt_close(old);
+    for opts in fallback_options(final_options) {
+        let mut ctx_attempt = base_ctx_template;
+        ctx_attempt.lcOptions = opts;
+        match wt_open(hwnd.0, &ctx_attempt) {
+            Ok(hnew) => {
+                *guard = hnew;
+                info!(options = format!("0x{opts:08X}"), "reopen WTOpen succeeded");
+                push_ui_event(
+                    EventSeverity::Info,
+                    format!("Context reopened options=0x{opts:08X}"),
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                error!(options = format!("0x{opts:08X}"), ?e, "reopen WTOpen failed");
             }
         }
-        error!("all reopen attempts failed; mapping update skipped");
-        push_ui_event(EventSeverity::Error, "Context reopen failed (all options)");
-        false
-    } else {
-        error!("failed to lock context mutex for reopen");
-        push_ui_event(EventSeverity::Error, "Context reopen mutex lock failed");
-        false
     }
+    error!("all reopen attempts failed; mapping update skipped");
+    push_ui_event(EventSeverity::Error, "Context reopen failed (all options)");
+    Err(anyhow!("all reopen attempts failed"))
 }
 
 /// Reopen context using an externally prepared `LOGCONTEXTA` template.
@@ -148,42 +141,29 @@ pub fn reopen_with_template(
     hwnd: SendHwnd,
     template: LOGCONTEXTA,
     final_options: u32,
-) -> bool {
-    if let Ok(mut guard) = hctx_cell.lock() {
-        let old = *guard;
-        wt_close(old);
-        for opts in fallback_options(final_options) {
-            let mut ctx_attempt = template;
-            ctx_attempt.lcOptions = opts; // only vary options
-            match wt_open(hwnd.0, &ctx_attempt) {
-                Ok(hnew) => {
-                    *guard = hnew;
-                    info!(
-                        options = format!("0x{opts:08X}"),
-                        "reopen(template) WTOpen succeeded"
-                    );
-                    return true;
-                }
-                Err(e) => {
-                    error!(
-                        options = format!("0x{opts:08X}"),
-                        ?e,
-                        "reopen(template) failed"
-                    );
-                }
+) -> Result<()> {
+    let mut guard = hctx_cell
+        .lock()
+        .map_err(|_| anyhow!("context mutex poisoned (reopen template)"))?;
+    let old = *guard;
+    wt_close(old);
+    for opts in fallback_options(final_options) {
+        let mut ctx_attempt = template;
+        ctx_attempt.lcOptions = opts; // only vary options
+        match wt_open(hwnd.0, &ctx_attempt) {
+            Ok(hnew) => {
+                *guard = hnew;
+                info!(options = format!("0x{opts:08X}"), "reopen(template) succeeded");
+                return Ok(());
+            }
+            Err(e) => {
+                error!(options = format!("0x{opts:08X}"), ?e, "reopen(template) failed");
             }
         }
-        error!("all reopen(template) attempts failed");
-        push_ui_event(EventSeverity::Error, "Context reopen(template) failed");
-        false
-    } else {
-        error!("failed to lock context mutex for reopen_with_template");
-        push_ui_event(
-            EventSeverity::Error,
-            "Context reopen(template) mutex lock failed",
-        );
-        false
     }
+    error!("all reopen(template) attempts failed");
+    push_ui_event(EventSeverity::Error, "Context reopen(template) failed");
+    Err(anyhow!("all reopen(template) attempts failed"))
 }
 
 #[cfg(test)]

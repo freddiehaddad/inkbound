@@ -18,11 +18,13 @@ pub enum SelectorType {
 }
 use crate::events::{EventSeverity, UiEvent, format_event_line, push_rate_limited, push_ui_event};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BACKGROUND_MODE, BI_BITFIELDS, BITMAPINFO, BITMAPV5HEADER, CLEARTYPE_QUALITY, COLOR_WINDOW,
-    CreateBitmap, CreateDIBSection, CreateFontIndirectW, DIB_RGB_COLORS, DeleteObject, FW_NORMAL,
-    GetSysColorBrush, HBITMAP, HFONT, HGDIOBJ, LOGFONTW, SetBkMode,
+    BI_BITFIELDS, BITMAPINFO, BITMAPV5HEADER, COLOR_WINDOW, CreateBitmap, CreateDIBSection,
+    CreateFontIndirectW, DIB_RGB_COLORS, DeleteObject, FW_NORMAL, GetSysColorBrush, HBITMAP, HDC,
+    HFONT, HGDIOBJ, LOGFONTW, SetBkMode, TRANSPARENT,
 };
+use windows::Win32::UI::Controls::SetWindowTheme;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
@@ -31,11 +33,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyIcon, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_READONLY, GetClientRect, GetCursorPos, HMENU, MF_STRING, MoveWindow, PostQuitMessage,
-    RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_PAINT, WM_SIZE, WNDCLASSW, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    ES_READONLY, GetClientRect, GetCursorPos, GetWindowTextLengthW, HMENU, MF_STRING, MoveWindow,
+    PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SetWindowTextW, ShowWindow,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_PAINT, WM_SIZE, WNDCLASSW, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VSCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{BM_SETCHECK, BS_AUTOCHECKBOX, SendMessageW};
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
@@ -71,6 +73,8 @@ pub struct GuiState {
     /// Handle to the events feed edit control
     events_edit: AtomicIsize,
     wait_timer_active: AtomicBool,
+    selector_label: AtomicIsize,
+    cb_keep_aspect: AtomicIsize,
 }
 
 impl GuiState {
@@ -90,6 +94,8 @@ impl GuiState {
             aspect_toggle_cb: OnceCell::new(),
             events_edit: AtomicIsize::new(0),
             wait_timer_active: AtomicBool::new(false),
+            selector_label: AtomicIsize::new(0),
+            cb_keep_aspect: AtomicIsize::new(0),
         }
     }
 }
@@ -238,16 +244,33 @@ fn current_toggle_label() -> &'static str {
     }
 }
 
-// DPI-aware font (global, recreated on DPI changes)
+// Removed custom font management to show default system control fonts.
+
+// Base logical metrics (96 DPI)
+const BASE_MARGIN: i32 = 16;
+const BASE_EDIT_HEIGHT: i32 = 24; // unify edit height with other controls for consistent vertical rhythm
+// Removed absolute Y position constants; rows flow sequentially.
+const BASE_BUTTON_HEIGHT: i32 = 32; // start/stop button height
+const BASE_CONTROL_H: i32 = 24; // radio / checkbox / label nominal height
+const BASE_V_GAP: i32 = 12; // uniform vertical gap between rows
+const BASE_RADIO_GAP: i32 = 16; // uniform horizontal gap between radios (text edge to next control)
+const BASE_WINDOW_W: i32 = 600;
+const BASE_WINDOW_H: i32 = 360;
+const BASE_LABEL_MIN: i32 = 40; // min logical label width
+const BASE_LABEL_MAX: i32 = 160; // max logical label width to avoid hogging row
+const BASE_LABEL_PADDING: i32 = 12; // padding added to measured text (logical)
+const BASE_LABEL_GAP: i32 = 8; // gap between label and textbox (logical)
+/// Scale a logical (96‑DPI based) dimension to the current DPI with rounding.
+fn scale(v: i32, dpi: u32) -> i32 {
+    (v * dpi as i32 + 48) / 96
+}
+// Shared application font (recreated on DPI changes). Using Segoe UI 12pt logical.
 static mut APP_FONT: HFONT = HFONT(0 as _);
-/// (Re)create the shared application font for the supplied DPI.
-///
-/// The font is recreated on WM_DPICHANGED and applied lazily to all controls. This keeps
-/// point size perception consistent across monitors while allowing per‑monitor awareness.
+
 unsafe fn recreate_font_for_dpi(dpi: u32) {
     unsafe {
         let mut lf: LOGFONTW = std::mem::zeroed();
-        let pt: i32 = 12; // increased from 11 for improved clarity
+        let pt: i32 = 12;
         lf.lfHeight = -((pt * dpi as i32 + 36) / 72);
         lf.lfWeight = FW_NORMAL.0 as i32;
         let face = U16CString::from_str("Segoe UI").unwrap();
@@ -257,43 +280,28 @@ unsafe fn recreate_font_for_dpi(dpi: u32) {
             }
             lf.lfFaceName[i] = *c;
         }
-        // Request ClearType quality so text matches other apps' smoothing
-        lf.lfQuality = CLEARTYPE_QUALITY;
-        let new_font = CreateFontIndirectW(&lf);
-        if !new_font.0.is_null() {
+        let f = CreateFontIndirectW(&lf);
+        if !f.0.is_null() {
             if !APP_FONT.0.is_null() {
                 let _ = DeleteObject(HGDIOBJ(APP_FONT.0));
             }
-            APP_FONT = new_font;
+            APP_FONT = f;
         }
     }
 }
-/// Apply the shared font to a control (no‑op if the font has not yet been created).
-fn apply_font(hwnd: HWND) {
+
+fn apply_font(h: HWND) {
     unsafe {
         const WM_SETFONT: u32 = 0x0030;
         if !APP_FONT.0.is_null() {
             let _ = SendMessageW(
-                hwnd,
+                h,
                 WM_SETFONT,
                 Some(WPARAM(APP_FONT.0 as usize)),
                 Some(LPARAM(1)),
             );
         }
     }
-}
-
-// Base logical metrics (96 DPI)
-const BASE_MARGIN: i32 = 16;
-const BASE_EDIT_HEIGHT: i32 = 28; // bumped for 12pt font ascenders/descenders
-const BASE_RADIO_TOP: i32 = 56; // tighter spacing below selector row
-const BASE_BUTTON_TOP: i32 = 136; // moved up to tighten gap below checkbox
-const BASE_BUTTON_HEIGHT: i32 = 32; // slightly taller start/stop button
-const BASE_WINDOW_W: i32 = 600;
-const BASE_WINDOW_H: i32 = 360;
-/// Scale a logical (96‑DPI based) dimension to the current DPI with rounding.
-fn scale(v: i32, dpi: u32) -> i32 {
-    (v * dpi as i32 + 48) / 96
 }
 /// Perform responsive layout for horizontally stretching controls.
 ///
@@ -304,53 +312,103 @@ fn layout_controls(hwnd: HWND, dpi: u32) {
     let gs = get_gui_state();
     unsafe {
         let margin = scale(BASE_MARGIN, dpi);
-        // Inline edit top (override previous vertical placement to align with label)
-        let edit_top = scale(16, dpi);
+        let gap = scale(BASE_V_GAP, dpi);
+        // Dynamically measure (approximate) selector label width based on its text length.
+        let mut label_w = scale(90, dpi); // fallback
+        let label_spacing = scale(BASE_LABEL_GAP, dpi);
+        let lab_handle_val = gs.selector_label.load(Ordering::Relaxed);
+        if lab_handle_val != 0 {
+            let wh = HWND(lab_handle_val as *mut _);
+            let txt_len = GetWindowTextLengthW(wh) as i32; // character count
+            if txt_len > 0 {
+                // Approximate character width at 96 DPI (~7px) then scale; add padding.
+                let logical_w =
+                    (txt_len * 7 + BASE_LABEL_PADDING).clamp(BASE_LABEL_MIN, BASE_LABEL_MAX);
+                label_w = scale(logical_w, dpi);
+            }
+        }
         let edit_h = scale(BASE_EDIT_HEIGHT, dpi);
-        let btn_top = scale(BASE_BUTTON_TOP, dpi);
+        let ctrl_h = scale(BASE_CONTROL_H, dpi);
         let btn_h = scale(BASE_BUTTON_HEIGHT, dpi);
-        // Reserve horizontal space for inline label + spacing (matches creation values: 90 + 8)
-        let label_w = scale(90, dpi);
-        let label_spacing = scale(8, dpi);
+
         let mut rc = RECT::default();
-        if GetClientRect(hwnd, &mut rc).is_ok() {
-            let total_width = (rc.right - rc.left) - margin * 2;
-            if total_width > 40 {
-                let e = gs.selector_edit.load(Ordering::Relaxed);
-                if e != 0 {
-                    let edit_x = margin + label_w + label_spacing;
-                    let avail_w = total_width - label_w - label_spacing;
-                    let final_w = if avail_w > 80 { avail_w } else { 80 };
-                    let _ = MoveWindow(HWND(e as *mut _), edit_x, edit_top, final_w, edit_h, true);
-                }
-                let b = gs.start_stop_button.load(Ordering::Relaxed);
-                if b != 0 {
-                    let _ =
-                        MoveWindow(HWND(b as *mut _), margin, btn_top, total_width, btn_h, true);
-                }
-                // Events panel (fills remaining space below button)
-                let ev = gs.events_edit.load(Ordering::Relaxed);
-                if ev != 0 {
-                    let events_top = btn_top + btn_h + scale(12, dpi);
-                    let mut rc2 = RECT::default();
-                    if GetClientRect(hwnd, &mut rc2).is_ok() {
-                        let remaining_h = (rc2.bottom - rc2.top) - events_top - margin;
-                        let min_h = scale(60, dpi);
-                        let final_h = if remaining_h < min_h {
-                            min_h
-                        } else {
-                            remaining_h
-                        };
-                        let _ = MoveWindow(
-                            HWND(ev as *mut _),
-                            margin,
-                            events_top,
-                            total_width,
-                            final_h,
-                            true,
-                        );
-                    }
-                }
+        if GetClientRect(hwnd, &mut rc).is_err() {
+            return;
+        }
+        let total_width = (rc.right - rc.left) - margin * 2;
+        if total_width <= 40 {
+            return;
+        }
+
+        let mut y = margin; // start below top margin
+
+        // Row 1: label + edit (uniform height)
+        let lab = lab_handle_val;
+        if lab != 0 {
+            let _ = MoveWindow(HWND(lab as *mut _), margin, y, label_w, ctrl_h, true);
+        }
+        let e = gs.selector_edit.load(Ordering::Relaxed);
+        if e != 0 {
+            let edit_x = margin + label_w + label_spacing;
+            let avail_w = total_width - label_w - label_spacing;
+            let final_w = avail_w.max(scale(80, dpi));
+            let _ = MoveWindow(HWND(e as *mut _), edit_x, y, final_w, edit_h, true);
+        }
+        y += ctrl_h + gap;
+
+        // Row 2: radios auto-sized approximately to text (char count heuristic) with uniform gap
+        let radios = [
+            gs.radio_process.load(Ordering::Relaxed),
+            gs.radio_class.load(Ordering::Relaxed),
+            gs.radio_title.load(Ordering::Relaxed),
+        ];
+        let gap_x = scale(BASE_RADIO_GAP, dpi);
+        let mut x = margin;
+        for h in radios.iter() {
+            if *h == 0 {
+                continue;
+            }
+            let wh = HWND(*h as *mut _);
+            // Length of text
+            let len = GetWindowTextLengthW(wh);
+            // Approx width: 7px per char + 20px padding for radio circle & spacing
+            let logical = (len * 7 + 20).max(48);
+            let w_px = scale(logical, dpi);
+            if x + w_px > margin + total_width {
+                break;
+            }
+            let _ = MoveWindow(wh, x, y, w_px, ctrl_h, true);
+            x += w_px + gap_x;
+        }
+        y += ctrl_h + gap;
+
+        // Row 3: checkbox
+        let cb = gs.cb_keep_aspect.load(Ordering::Relaxed);
+        if cb != 0 {
+            let _ = MoveWindow(HWND(cb as *mut _), margin, y, total_width, ctrl_h, true);
+        }
+        y += ctrl_h + gap;
+
+        // Row 4: start/stop button
+        let b = gs.start_stop_button.load(Ordering::Relaxed);
+        if b != 0 {
+            let _ = MoveWindow(HWND(b as *mut _), margin, y, total_width, btn_h, true);
+        }
+        y += btn_h + gap;
+
+        // Events panel fills remainder
+        let ev = gs.events_edit.load(Ordering::Relaxed);
+        if ev != 0 {
+            let mut rc2 = RECT::default();
+            if GetClientRect(hwnd, &mut rc2).is_ok() {
+                let remaining_h = (rc2.bottom - rc2.top) - y - margin;
+                let min_h = scale(60, dpi);
+                let final_h = if remaining_h < min_h {
+                    min_h
+                } else {
+                    remaining_h
+                };
+                let _ = MoveWindow(HWND(ev as *mut _), margin, y, total_width, final_h, true);
             }
         }
     }
@@ -468,23 +526,11 @@ unsafe extern "system" fn main_wnd_proc(
             LRESULT(0)
         },
         // WM_CTLCOLORSTATIC (0x0138) -> labels transparent; events EDIT opaque (avoid ClearType bold overdraw)
-        0x0138 => unsafe {
-            let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as isize as *mut _);
-            let ctrl_hwnd = HWND(lparam.0 as *mut _);
-            let events_hwnd = HWND(get_gui_state().events_edit.load(Ordering::Relaxed) as *mut _);
-            if ctrl_hwnd.0 == events_hwnd.0 {
-                let _ = SetBkMode(hdc, BACKGROUND_MODE(2)); // OPAQUE
-            } else {
-                let _ = SetBkMode(hdc, BACKGROUND_MODE(1)); // TRANSPARENT
-            }
-            let brush = GetSysColorBrush(COLOR_WINDOW);
-            LRESULT(brush.0 as isize)
-        },
+        // Removed WM_CTLCOLORSTATIC customization to let default theming draw controls.
         // (0x0135 WM_CTLCOLORBTN falls through to default proc)
         0x02E0 => unsafe {
             // WM_DPICHANGED
             let new_dpi = (wparam.0 & 0xFFFF) as u32;
-            recreate_font_for_dpi(new_dpi);
             let suggested = lparam.0 as *const RECT;
             if !suggested.is_null() {
                 let r = *suggested;
@@ -497,22 +543,50 @@ unsafe extern "system" fn main_wnd_proc(
                     true,
                 );
             }
-            layout_controls(hwnd, new_dpi);
+            recreate_font_for_dpi(new_dpi);
+            // Reapply font to all controls
             let gs = get_gui_state();
             for h in [
+                gs.selector_label.load(Ordering::Relaxed),
                 gs.selector_edit.load(Ordering::Relaxed),
-                gs.start_stop_button.load(Ordering::Relaxed),
                 gs.radio_process.load(Ordering::Relaxed),
                 gs.radio_class.load(Ordering::Relaxed),
                 gs.radio_title.load(Ordering::Relaxed),
+                gs.cb_keep_aspect.load(Ordering::Relaxed),
+                gs.start_stop_button.load(Ordering::Relaxed),
+                gs.events_edit.load(Ordering::Relaxed),
             ] {
                 if h != 0 {
                     apply_font(HWND(h as *mut _));
                 }
             }
+            layout_controls(hwnd, new_dpi);
             push_ui_event(EventSeverity::Info, format!("DPI change: {new_dpi}"));
             LRESULT(0)
         },
+        0x0138 | 0x0135 => {
+            // WM_CTLCOLORSTATIC / WM_CTLCOLORBTN
+            unsafe {
+                let ctrl = lparam.0;
+                let gs = get_gui_state();
+                let targets = [
+                    gs.selector_label.load(Ordering::Relaxed),
+                    gs.radio_process.load(Ordering::Relaxed),
+                    gs.radio_class.load(Ordering::Relaxed),
+                    gs.radio_title.load(Ordering::Relaxed),
+                    gs.cb_keep_aspect.load(Ordering::Relaxed),
+                ];
+                if targets.contains(&ctrl) {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    if !hdc.0.is_null() {
+                        let _ = SetBkMode(hdc, TRANSPARENT);
+                    }
+                    let brush = GetSysColorBrush(COLOR_WINDOW);
+                    return LRESULT(brush.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
         0x0113 => {
             // WM_TIMER
             let timer_id = wparam.0;
@@ -589,15 +663,25 @@ unsafe extern "system" fn main_wnd_proc(
         WM_DESTROY => unsafe {
             // Ensure timer cleaned up
             stop_wait_timer();
-            if !APP_FONT.0.is_null() {
-                let _ = DeleteObject(HGDIOBJ(APP_FONT.0));
-                APP_FONT = HFONT(0 as _);
-            }
+            // Font cleanup no longer required (default fonts in use)
             // no dark brush cleanup needed
             remove_tray_icon(hwnd);
             PostQuitMessage(0);
             LRESULT(0)
         },
+        0x0024 => {
+            // WM_GETMINMAXINFO
+            use windows::Win32::UI::WindowsAndMessaging::MINMAXINFO;
+            let mmi = lparam.0 as *mut MINMAXINFO;
+            if !mmi.is_null() {
+                unsafe {
+                    let dpi = GetDpiForWindow(hwnd);
+                    (*mmi).ptMinTrackSize.x = scale(BASE_WINDOW_W * 6 / 10, dpi) as i32;
+                    (*mmi).ptMinTrackSize.y = scale(BASE_WINDOW_H * 6 / 10, dpi) as i32;
+                }
+            }
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -632,7 +716,7 @@ fn create_raw_main_window(title: &str) -> Result<HWND> {
             WINDOW_EX_STYLE(0),
             PCWSTR(class.as_ptr()),
             PCWSTR(title_u16.as_ptr()),
-            WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | WS_VISIBLE.0),
+            WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0),
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             BASE_WINDOW_W,
@@ -643,14 +727,55 @@ fn create_raw_main_window(title: &str) -> Result<HWND> {
             None,
         )?;
         let dpi = GetDpiForWindow(hwnd) as u32;
-        recreate_font_for_dpi(dpi);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        // Apply light-mode + Mica backdrop (Win11). These calls are best-effort; failures are ignored on older builds.
+        // Apply Mica + force light mode (best-effort; ignore failures on unsupported systems)
+        const DWMWA_USE_IMMERSIVE_DARK_MODE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(20);
+        const DWMWA_SYSTEMBACKDROP_TYPE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(38); // 2 = Mica
+        let dark_off: i32 = 0; // FALSE
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_off as *const _ as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
+        let mica_type: i32 = 2; // Mica
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &mica_type as *const _ as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
         get_gui_state()
             .visible_main
             .store(hwnd.0 as isize, Ordering::Relaxed);
         add_tray_icon(hwnd);
-        layout_controls(hwnd, dpi);
+        layout_controls(hwnd, dpi); // initial layout before first paint
         Ok(hwnd)
+    }
+}
+
+/// Show all child controls (after initial layout) to avoid pre-layout flicker / misplaced visuals.
+fn show_child_controls(hwnd: HWND) {
+    let gs = get_gui_state();
+    let ids = [
+        gs.selector_label.load(Ordering::Relaxed),
+        gs.selector_edit.load(Ordering::Relaxed),
+        gs.radio_process.load(Ordering::Relaxed),
+        gs.radio_class.load(Ordering::Relaxed),
+        gs.radio_title.load(Ordering::Relaxed),
+        gs.cb_keep_aspect.load(Ordering::Relaxed),
+        gs.start_stop_button.load(Ordering::Relaxed),
+        gs.events_edit.load(Ordering::Relaxed),
+    ];
+    for h in ids {
+        if h != 0 {
+            unsafe {
+                let _ = ShowWindow(HWND(h as *mut _), SW_SHOW);
+            }
+        }
+    }
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
     }
 }
 
@@ -675,6 +800,10 @@ pub fn create_main_window(
     let _ = add_option_checkboxes(hwnd, preserve_aspect);
     let _ = add_start_stop_button(hwnd, initial_run_enabled);
     let _ = add_events_panel(hwnd);
+    unsafe {
+        layout_controls(hwnd, GetDpiForWindow(hwnd));
+    }
+    show_child_controls(hwnd);
     Ok(hwnd)
 }
 
@@ -688,11 +817,11 @@ pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<
             WINDOW_EX_STYLE(0),
             PCWSTR(U16CString::from_str("BUTTON").unwrap().as_ptr()),
             PCWSTR(caption.as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | (BS_PUSHBUTTON as u32)),
-            16,
-            160,
-            140,
-            28,
+            WINDOW_STYLE(WS_CHILD.0 | WS_TABSTOP.0 | (BS_PUSHBUTTON as u32)),
+            0,
+            0,
+            0,
+            0,
             Some(parent),
             Some(HMENU(ID_START_STOP as *mut _)),
             None,
@@ -702,7 +831,11 @@ pub fn add_start_stop_button(parent: HWND, initial_run_enabled: bool) -> Result<
             get_gui_state()
                 .start_stop_button
                 .store(hb.0 as isize, Ordering::Relaxed);
-            apply_font(hb);
+            let _ = SetWindowTheme(
+                hb,
+                PCWSTR(U16CString::from_str("Explorer").unwrap().as_ptr()),
+                PCWSTR(std::ptr::null()),
+            );
         }
     }
     Ok(())
@@ -714,7 +847,6 @@ pub fn add_events_panel(parent: HWND) -> Result<()> {
         // Initial placeholder geometry; will be stretched in layout_controls.
         let style = WINDOW_STYLE(
             WS_CHILD.0
-                | WS_VISIBLE.0
                 | WS_VSCROLL.0
                 | (ES_MULTILINE as u32)
                 | (ES_AUTOVSCROLL as u32)
@@ -725,10 +857,10 @@ pub fn add_events_panel(parent: HWND) -> Result<()> {
             PCWSTR(U16CString::from_str("EDIT").unwrap().as_ptr()),
             PCWSTR(U16CString::from_str("").unwrap().as_ptr()),
             style,
-            16,
-            200,
-            400,
-            120,
+            0,
+            0,
+            0,
+            0,
             Some(parent),
             None,
             None,
@@ -738,7 +870,6 @@ pub fn add_events_panel(parent: HWND) -> Result<()> {
             get_gui_state()
                 .events_edit
                 .store(h.0 as isize, Ordering::Relaxed);
-            apply_font(h);
         }
     }
     Ok(())
@@ -871,27 +1002,26 @@ pub fn is_run_enabled() -> bool {
 /// Add a simple labeled read‑only textbox displaying the selected target spec.
 /// Add the inline label + editable textbox for specifying / editing the target selector value.
 pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()> {
-    // Positions are static for now; no DPI handling yet.
+    // Initial positions are placeholders; layout_controls will move & size.
     let label_w =
         U16CString::from_str(label).unwrap_or_else(|_| U16CString::from_str("Selector").unwrap());
     let value_w = U16CString::from_str(value).unwrap_or_else(|_| U16CString::from_str("").unwrap());
     unsafe {
         // Static label
-        let label_x = 16;
-        let label_y = 20; // slightly centered vertically relative to textbox
-        let label_width = 90; // narrower label width now that it's inline
-        let label_height = 24; // increased to avoid clipping descenders
-        let spacing = 8; // gap between label and textbox
-        let textbox_x = label_x + label_width + spacing;
-        let textbox_y = 16; // align with top area
-        let textbox_width = 400; // will still be resized on WM_SIZE
-        let textbox_height = 26;
+        let label_x = 0;
+        let label_y = 0; // placeholder
+        let label_width = 0; // placeholder width; real size in layout
+        let label_height = BASE_CONTROL_H;
+        let textbox_x = 0;
+        let textbox_y = 0; // placeholder
+        let textbox_width = 0; // placeholder
+        let textbox_height = BASE_EDIT_HEIGHT;
 
         let _h_static = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(U16CString::from_str("STATIC").unwrap().as_ptr()),
             PCWSTR(label_w.as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
+            WINDOW_STYLE(WS_CHILD.0 | 0x0000_0200), // SS_CENTERIMAGE for vertical centering
             label_x,
             label_y,
             label_width,
@@ -902,10 +1032,17 @@ pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()
             None,
         );
         if let Ok(hs) = _h_static {
-            apply_font(hs);
+            get_gui_state()
+                .selector_label
+                .store(hs.0 as isize, Ordering::Relaxed);
+            let _ = SetWindowTheme(
+                hs,
+                PCWSTR(U16CString::from_str("Explorer").unwrap().as_ptr()),
+                PCWSTR(std::ptr::null()),
+            );
         }
         // Edit box (always editable)
-        let style = WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | (ES_AUTOHSCROLL as u32));
+        let style = WINDOW_STYLE(WS_CHILD.0 | (ES_AUTOHSCROLL as u32));
         let h_edit = CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
             PCWSTR(U16CString::from_str("EDIT").unwrap().as_ptr()),
@@ -924,7 +1061,11 @@ pub fn add_selector_textbox(parent: HWND, label: &str, value: &str) -> Result<()
             get_gui_state()
                 .selector_edit
                 .store(hwnd_edit.0 as isize, Ordering::Relaxed);
-            apply_font(hwnd_edit);
+            let _ = SetWindowTheme(
+                hwnd_edit,
+                PCWSTR(U16CString::from_str("Explorer").unwrap().as_ptr()),
+                PCWSTR(std::ptr::null()),
+            );
         }
     }
     Ok(())
@@ -940,8 +1081,7 @@ pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> 
         let create_radio =
             |text: &str, x: i32, y: i32, id: usize, is_first: bool| -> Result<HWND> {
                 let wstr = U16CString::from_str(text)?;
-                let mut style =
-                    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | (BS_AUTORADIOBUTTON as u32));
+                let mut style = WINDOW_STYLE(WS_CHILD.0 | (BS_AUTORADIOBUTTON as u32));
                 if is_first {
                     style = WINDOW_STYLE(style.0 | WS_GROUP.0); // First radio button starts a new group
                 }
@@ -964,12 +1104,17 @@ pub fn add_selector_radio_buttons(parent: HWND, selected_type: SelectorType) -> 
             };
 
         // Create radio buttons horizontally
-        let radio_process = create_radio("Process", 16, BASE_RADIO_TOP, ID_RADIO_PROCESS, true)?;
-        apply_font(radio_process);
-        let radio_class = create_radio("Class", 112, BASE_RADIO_TOP, ID_RADIO_CLASS, false)?;
-        apply_font(radio_class);
-        let radio_title = create_radio("Title", 192, BASE_RADIO_TOP, ID_RADIO_TITLE, false)?;
-        apply_font(radio_title);
+        // Initial Y placeholder 0; real position determined by layout_controls flow.
+        let radio_process = create_radio("Process", 16, 0, ID_RADIO_PROCESS, true)?;
+        let radio_class = create_radio("Class", 112, 0, ID_RADIO_CLASS, false)?;
+        let radio_title = create_radio("Title", 192, 0, ID_RADIO_TITLE, false)?;
+        for rb in [radio_process, radio_class, radio_title] {
+            let _ = SetWindowTheme(
+                rb,
+                PCWSTR(U16CString::from_str("Explorer").unwrap().as_ptr()),
+                PCWSTR(std::ptr::null()),
+            );
+        }
 
         // Store handles
         let gui_state = get_gui_state();
@@ -1014,9 +1159,9 @@ pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> 
                 PCWSTR(wstr.as_ptr()),
                 // Create hidden first; we'll set font then show to avoid initial bold/default font paint
                 WINDOW_STYLE(WS_CHILD.0 | (BS_AUTOCHECKBOX as u32)),
-                16,
+                0,
                 y,
-                500,
+                0,
                 24, // taller to prevent text clipping
                 Some(parent),
                 id.map(|v| HMENU(v as *mut _)),
@@ -1027,15 +1172,18 @@ pub fn add_option_checkboxes(parent: HWND, preserve_aspect: bool) -> Result<()> 
         };
         // BM_SETCHECK expects wParam = BST_* (0/1/2)
         const BST_CHECKED: usize = 1;
-        if let Some(cb1) = make_cb("Keep tablet aspect", 96, Some(ID_CB_KEEP_ASPECT))
-            && preserve_aspect
-        {
-            let _ = SendMessageW(cb1, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), Some(LPARAM(0)));
-            apply_font(cb1);
-            let _ = ShowWindow(cb1, SW_SHOW);
-        } else if let Some(cb1) = make_cb("Keep tablet aspect", 96, Some(ID_CB_KEEP_ASPECT)) {
-            apply_font(cb1);
-            let _ = ShowWindow(cb1, SW_SHOW);
+        if let Some(cb1) = make_cb("Keep tablet aspect", 0, Some(ID_CB_KEEP_ASPECT)) {
+            get_gui_state()
+                .cb_keep_aspect
+                .store(cb1.0 as isize, Ordering::Relaxed);
+            if preserve_aspect {
+                let _ = SendMessageW(cb1, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), Some(LPARAM(0)));
+            }
+            let _ = SetWindowTheme(
+                cb1,
+                PCWSTR(U16CString::from_str("Explorer").unwrap().as_ptr()),
+                PCWSTR(std::ptr::null()),
+            );
         }
         // (Second checkbox for removed feature intentionally omitted.)
     }

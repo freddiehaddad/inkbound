@@ -16,8 +16,8 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Parser)]
-#[command(name = "wacom-magnet")]
-#[command(about = "Automatically maps your Wacom tablet to a target window")]
+#[command(name = "inkbound")]
+#[command(about = "Automatically maps your tablet to a target window")]
 struct Args {
     /// Process name or window title to track (case-insensitive substring match)
     #[arg(short, long)]

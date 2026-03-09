@@ -1,7 +1,8 @@
 [package]
-name = "wacom-magnet"
+name = "inkbound"
 version = "0.1.0"
 edition = "2024"
+description = "Automatically maps your tablet to a target window"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

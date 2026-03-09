@@ -1,9 +1,66 @@
 use crate::geometry::{DisplayArea, TabletArea};
 use anyhow::{Context, Result, bail};
-use std::process::Command;
+use std::process::{Child, Command};
 
 const SETTINGS_PATH_ENV: &str = "LOCALAPPDATA";
 const SETTINGS_REL_PATH: &str = r"OpenTabletDriver\settings.json";
+
+/// Ensures the OTD daemon is running. Returns a `DaemonGuard` that will
+/// stop the daemon on drop if we started it.
+pub fn ensure_daemon_running() -> Result<DaemonGuard> {
+    if is_daemon_running() {
+        log::info!("OTD daemon already running");
+        return Ok(DaemonGuard { child: None });
+    }
+
+    log::info!("Starting OTD daemon...");
+    let child = Command::new("OpenTabletDriver.Daemon.exe")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Failed to start OpenTabletDriver.Daemon.exe — is it installed?")?;
+
+    // Give the daemon time to initialize
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    if !is_daemon_running() {
+        bail!("OTD daemon failed to start");
+    }
+
+    log::info!("OTD daemon started (PID: {})", child.id());
+    Ok(DaemonGuard { child: Some(child) })
+}
+
+fn is_daemon_running() -> bool {
+    Command::new("OpenTabletDriver.Console.exe")
+        .args(["detect"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Stops the daemon on drop if we started it.
+pub struct DaemonGuard {
+    child: Option<Child>,
+}
+
+impl DaemonGuard {
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        if let Some(ref mut child) = self.child {
+            log::info!("Stopping OTD daemon (PID: {})...", child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 pub struct OtdBridge {
     tablet_name: String,

@@ -28,11 +28,11 @@ winget install --id OpenTabletDriver.OpenTabletDriver
 
 After installation, **restart your computer**.
 
-### Step 3: Start the OpenTabletDriver daemon
+### Step 3: Start the OpenTabletDriver daemon (optional)
 
-Run `OpenTabletDriver.Daemon.exe` after rebooting. Your tablet should respond to
-pen movement. You can optionally open `OpenTabletDriver.UX.Wpf.exe` to verify
-your tablet is detected and configure pressure curves, pen buttons, etc.
+wacom-magnet will automatically start the OTD daemon if it's not already
+running, and stop it when wacom-magnet exits. If you prefer to manage the daemon
+yourself, run `OpenTabletDriver.Daemon.exe` before starting wacom-magnet.
 
 > **Tip:** To have OTD always running, add `OpenTabletDriver.Daemon.exe` to
 > your Startup folder.

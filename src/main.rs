@@ -74,6 +74,7 @@ thread_local! {
 struct RestoreInfo {
     tablet_name: String,
     original_display_area: DisplayArea,
+    daemon_pid: Option<u32>,
 }
 
 static RESTORE_INFO: OnceLock<RestoreInfo> = OnceLock::new();
@@ -89,6 +90,9 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Ensure OTD daemon is running (starts it if needed, stops on exit)
+    let _daemon_guard = otd::ensure_daemon_running()?;
+
     // Detect tablet name
     let tablet_name = match args.tablet {
         Some(name) => name,
@@ -100,10 +104,12 @@ fn main() -> Result<()> {
     let tablet_aspect_ratio = otd_bridge.tablet_aspect_ratio();
 
     // Store restore info globally for the Ctrl+C handler
+    let daemon_pid = _daemon_guard.pid();
     RESTORE_INFO
         .set(RestoreInfo {
             tablet_name,
             original_display_area: otd_bridge.original_display_area().clone(),
+            daemon_pid,
         })
         .ok();
     MAIN_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
@@ -158,14 +164,17 @@ fn main() -> Result<()> {
     // Run the Win32 message loop (blocks until WM_QUIT)
     run_message_loop();
 
-    // Cleanup: restore original mapping
-    APP.with(|app| {
-        if let Some(app) = app.borrow().as_ref()
-            && let Err(e) = app.otd.restore_original()
-        {
-            log::error!("Failed to restore original mapping: {e}");
-        }
-    });
+    // Cleanup: restore original mapping only if we didn't start the daemon
+    // (if we started it, we're about to kill it — no point restoring)
+    if daemon_pid.is_none() {
+        APP.with(|app| {
+            if let Some(app) = app.borrow().as_ref()
+                && let Err(e) = app.otd.restore_original()
+            {
+                log::error!("Failed to restore original mapping: {e}");
+            }
+        });
+    }
 
     for hook in hooks {
         unsafe {
@@ -432,16 +441,24 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
     if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT || ctrl_type == CTRL_BREAK_EVENT {
         // Restore original mapping directly (works from any thread)
         if let Some(info) = RESTORE_INFO.get() {
-            let _ = std::process::Command::new("OpenTabletDriver.Console.exe")
-                .args([
-                    "setdisplayarea",
-                    &info.tablet_name,
-                    &info.original_display_area.width.to_string(),
-                    &info.original_display_area.height.to_string(),
-                    &info.original_display_area.center_x.to_string(),
-                    &info.original_display_area.center_y.to_string(),
-                ])
-                .output();
+            if let Some(pid) = info.daemon_pid {
+                // We started the daemon — kill it, no need to restore settings
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .output();
+            } else {
+                // Daemon was already running — restore original mapping
+                let _ = std::process::Command::new("OpenTabletDriver.Console.exe")
+                    .args([
+                        "setdisplayarea",
+                        &info.tablet_name,
+                        &info.original_display_area.width.to_string(),
+                        &info.original_display_area.height.to_string(),
+                        &info.original_display_area.center_x.to_string(),
+                        &info.original_display_area.center_y.to_string(),
+                    ])
+                    .output();
+            }
         }
 
         // Signal the main thread's message loop to exit

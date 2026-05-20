@@ -33,12 +33,20 @@ pub fn ensure_daemon_running() -> Result<DaemonGuard> {
 }
 
 fn is_daemon_running() -> bool {
-    Command::new("OpenTabletDriver.Console.exe")
+    // OpenTabletDriver.Console.exe always exits with code 0, even when the
+    // daemon isn't running. We detect by inspecting stdout: a running daemon
+    // produces no output, while a missing daemon prints
+    // "OpenTabletDriver Daemon not running".
+    let Ok(output) = Command::new("OpenTabletDriver.Console.exe")
         .args(["detect"])
-        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+    else {
+        return false;
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    !stdout.contains("Daemon not running")
 }
 
 /// Stops the daemon on drop if we started it.
@@ -202,6 +210,11 @@ fn get_areas(tablet_name: &str) -> Result<(DisplayArea, TabletArea)> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if stdout.contains("Daemon not running") {
+        bail!("OTD daemon stopped unexpectedly while reading tablet areas");
+    }
+
     let display = parse_area_from_output(&stdout, "Display area:")?;
     let tablet = parse_area_from_output(&stdout, "Tablet area:")?;
 

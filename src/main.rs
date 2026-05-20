@@ -237,20 +237,16 @@ unsafe extern "system" fn win_event_callback(
         let Some(app) = app.as_mut() else { return };
 
         match event {
-            EVENT_SYSTEM_MOVESIZESTART => {
-                if is_tracked(app, hwnd) {
-                    app.in_move_size = true;
-                }
+            EVENT_SYSTEM_MOVESIZESTART if is_tracked(app, hwnd) => {
+                app.in_move_size = true;
             }
 
-            EVENT_SYSTEM_MOVESIZEEND => {
-                if is_tracked(app, hwnd) {
-                    app.in_move_size = false;
-                    unsafe {
-                        let _ = KillTimer(None, DEBOUNCE_TIMER_ID);
-                    }
-                    update_mapping(app, hwnd);
+            EVENT_SYSTEM_MOVESIZEEND if is_tracked(app, hwnd) => {
+                app.in_move_size = false;
+                unsafe {
+                    let _ = KillTimer(None, DEBOUNCE_TIMER_ID);
                 }
+                update_mapping(app, hwnd);
             }
 
             EVENT_OBJECT_LOCATIONCHANGE => {
@@ -295,14 +291,14 @@ fn handle_location_change(app: &mut AppState, hwnd: HWND) {
                 }
             }
         }
-        State::Suspended { hwnd: tracked } if hwnd == tracked => {
-            if !window::is_minimized(hwnd) {
-                log::info!(
-                    "Target window restored: \"{}\"",
-                    window::get_window_title(hwnd)
-                );
-                transition_to_tracking(app, hwnd);
-            }
+        State::Suspended { hwnd: tracked }
+            if hwnd == tracked && !window::is_minimized(hwnd) =>
+        {
+            log::info!(
+                "Target window restored: \"{}\"",
+                window::get_window_title(hwnd)
+            );
+            transition_to_tracking(app, hwnd);
         }
         _ => {}
     }
@@ -325,23 +321,23 @@ fn handle_foreground(app: &mut AppState, hwnd: HWND) {
 
 fn handle_show(app: &mut AppState, hwnd: HWND) {
     match app.state {
-        State::WaitingForWindow => {
-            if window::matches_target(hwnd, &app.target) && window::is_valid_window(hwnd) {
-                log::info!(
-                    "Target window appeared: \"{}\"",
-                    window::get_window_title(hwnd)
-                );
-                transition_to_tracking(app, hwnd);
-            }
+        State::WaitingForWindow
+            if window::matches_target(hwnd, &app.target) && window::is_valid_window(hwnd) =>
+        {
+            log::info!(
+                "Target window appeared: \"{}\"",
+                window::get_window_title(hwnd)
+            );
+            transition_to_tracking(app, hwnd);
         }
-        State::Suspended { hwnd: tracked } if hwnd == tracked => {
-            if !window::is_minimized(hwnd) {
-                log::info!(
-                    "Target window restored: \"{}\"",
-                    window::get_window_title(hwnd)
-                );
-                transition_to_tracking(app, hwnd);
-            }
+        State::Suspended { hwnd: tracked }
+            if hwnd == tracked && !window::is_minimized(hwnd) =>
+        {
+            log::info!(
+                "Target window restored: \"{}\"",
+                window::get_window_title(hwnd)
+            );
+            transition_to_tracking(app, hwnd);
         }
         _ => {}
     }
